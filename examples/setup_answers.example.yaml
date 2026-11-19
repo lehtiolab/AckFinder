@@ -1,0 +1,41 @@
+# Answers file for `ackfinder init --answers setup_answers.yaml`.
+# Plain names and words only; the tool writes the regular expressions.
+# Only facility_name and acknowledgement_statement are required. Lists may also be
+# written as one string separated by ';'.
+
+facility_name: Example Proteomics Facility
+short_name: EPF                                   # used in file names: EPF_acknowledgements_<year>
+host_institution: Example University
+name_variants:                                    # other ways papers write the name
+  - Example Proteomics Core
+  - EPF facility
+acknowledgement_statement: >-
+  Mass spectrometry analysis was performed by the Example Proteomics Facility, funded by the
+  Example University Infrastructure Board.
+
+# Optional: a funder whose name alone may stand in for the facility. Sentences naming it
+# without the facility go to "Needs review" if they mention field_terms.
+funding_body: Example University Infrastructure Board
+field_terms: [proteom, mass spectromet]           # word stems are fine
+other_facilities: [flow cytometry, electron microscopy, genomics core]
+
+# Optional scope check (delete the block to switch it off).
+scope:
+  column: MS type
+  in_scope_label: Proteomics
+  in_scope_terms: [proteom, peptide, trypsin, TMT, DIA, MaxQuant]
+  out_of_scope_label: Small-molecule MS
+  out_of_scope_terms: [metabolom, lipidom]
+  out_of_scope_note: metabolomics, lipidomics; run by another facility
+  out_of_scope_facilities: [Metabolomics Core]
+
+include_facility_authors: false
+
+# Folders (relative to config.yaml)
+output_dir: reports/epf_acknowledgements
+cache_dir: cache
+pdf_dir: pdfs
+years: [2025, 2026]
+year_basis: first                                 # or: issue
+jif_table: null                                   # path to a JCR export, if you have one
+manual_decisions: manual_decisions.yaml

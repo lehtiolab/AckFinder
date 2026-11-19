@@ -1,0 +1,27 @@
+# Your own settings and data: never commit these
+config.yaml
+config.yaml.bak
+.env
+manual_decisions.yaml
+manual_decisions.csv
+setup_answers.yaml
+cache/
+pdfs/
+reports/
+
+# Environments and build artefacts
+.venv/
+.pixi/
+dist/
+build/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Scratch, workspace and sync leftovers
+tmp/
+.claude/
+.capsule/
+*(conflict from OneDrive*
+.DS_Store
+Thumbs.db

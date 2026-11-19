@@ -1,0 +1,24 @@
+# Manual decisions: your own include/exclude calls, applied by the tool on every run,
+# so the reports never need hand editing. Copy this file to the path set as
+# `manual_decisions` in config.yaml (default: manual_decisions.yaml next to it).
+#
+#   decision: include  -> counted (Inclusion basis "Manual decision" unless the tool had
+#                         already confirmed it), even if the automatic call was Needs
+#                         review, Unverified or Excluded. A DOI that no search found is
+#                         looked up and added.
+#   decision: exclude  -> moved to Excluded, even if the tool confirmed it.
+#
+# `reason` is printed in the report. `decided_by` and `date` are optional but make the
+# audit trail useful. The same columns work in a CSV file (doi,decision,reason,decided_by,date).
+
+- doi: "10.1234/example.2025.001"
+  decision: include
+  reason: Acknowledges "the proteomics core facility at Example University"; confirmed with the corresponding author.
+  decided_by: AB
+  date: "2026-01-15"
+
+- doi: "10.1234/example.2025.002"
+  decision: exclude
+  reason: The funder sentence refers to the imaging facility.
+  decided_by: AB
+  date: "2026-01-15"

@@ -1,0 +1,36 @@
+# pixi manifest: `pixi install` creates the environment (conda-forge packages plus this
+# package in editable mode); `pixi run <task>` runs a task in it. See README.md.
+[workspace]
+name = "ackfinder"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.10,<3.14"
+pandas = ">=2.0"
+requests = ">=2.31"
+lxml = ">=4.9"
+pypdf = ">=4.0"
+pyyaml = ">=6.0"
+xlsxwriter = ">=3.1"
+openpyxl = ">=3.1"
+
+[pypi-dependencies]
+ackfinder = { path = ".", editable = true }
+
+[tasks]
+setup = "ackfinder init --interactive"
+check = "ackfinder check --online"
+report = "ackfinder run"
+
+[feature.dev.dependencies]
+pytest = ">=8"
+pyflakes = ">=3"
+
+[feature.dev.tasks]
+test = "pytest -q"
+lint = "pyflakes src tests"
+
+[environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }

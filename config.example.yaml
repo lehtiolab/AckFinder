@@ -1,0 +1,180 @@
+# AckFinder configuration (template)
+# ============================================================================
+# How to use this file
+#   * Easiest: run `ackfinder init --interactive`. It asks plain questions and
+#     writes config.yaml for you, including the patterns (no regex writing needed).
+#   * By hand: copy this file to config.yaml, replace every CHANGE_ME, then run
+#     `ackfinder check`. It lists anything that is still missing or wrong.
+#
+# Only section 1 is required. Every other setting has a working default.
+# Relative paths are relative to the folder that holds this file.
+# Keys ending in _regex are Python regular expressions, matched case-insensitively.
+# Write them in single quotes. `ackfinder classify "some sentence"` shows how a
+# sentence is classified, so you can test a pattern before a full run.
+# A complete real example is in examples/config.cpms.yaml.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. Your facility (REQUIRED)
+# ----------------------------------------------------------------------------
+
+# Name shown in report titles.
+facility_label: "CHANGE_ME: Example Proteomics Facility (Example University)"
+
+# Report file names are <report_slug>_<year>.md/.csv/.xlsx.
+# Leave empty to derive one from facility_label (e.g. "EPF_acknowledgements").
+report_slug: ""
+
+# The acknowledgement sentence you ask users to put in their papers. A sentence that
+# names your facility and is at least `canonical_threshold` similar to this one is
+# reported as "Canonical statement"; other sentences naming the facility are
+# "Variant wording". Both are counted.
+canonical_statement: >-
+  CHANGE_ME: Mass spectrometry analysis was performed by the Example Proteomics Facility,
+  funded by the Example University Infrastructure Board.
+
+# Pattern that decides whether a sentence names your facility. A paper is counted only
+# if one of its sentences matches this. Allow for spaces, hyphens and short forms.
+# Example for "Clinical Proteomics Mass Spectrometry" (also catches "Clinical Proteomics MS"):
+#   'clinical[\s\-]+proteomics[\s\-]+(?:mass[\s\-]*spectrometry|ms)\b'
+facility_regex: 'CHANGE_ME'
+
+# ----------------------------------------------------------------------------
+# 2. Search
+# ----------------------------------------------------------------------------
+
+# Exact phrases sent to the full-text indexes (Europe PMC, PubMed Central).
+# Be generous: every hit is downloaded and checked sentence by sentence, so a broad
+# phrase costs a few extra downloads, not false positives. Each phrase should match
+# facility_regex (or funding_regex in section 3); `ackfinder check` warns if not.
+search_phrases:
+  - "CHANGE_ME: full facility name"
+
+# Phrases sent to OpenAlex (uses its daily API budget). Empty/null = same as search_phrases.
+openalex_phrases: null
+
+# ----------------------------------------------------------------------------
+# 3. Funder-only sentences -> "Needs review" (optional)
+# ----------------------------------------------------------------------------
+# Some papers thank the facility's funder without naming the facility, e.g.
+# "... supported by the Infrastructure Board at Karolinska Institutet". With
+# funding_regex set, such sentences are found and the paper goes to "Needs review"
+# (never counted) if the sentence also matches context_regex and does not name
+# another facility (other_facility_regex). Leave funding_regex empty to switch off.
+
+# Pattern for the funder's name. Also add the funder's name to search_phrases.
+funding_regex: ''
+
+# How reports name the funder, e.g. "the KI Infrastructure Board".
+funding_label: ""
+
+# Words showing the sentence is about your field, e.g. 'proteom|mass[\s\-]*spectromet'.
+# Empty = every funder-only sentence goes to review.
+context_regex: ''
+
+# How reports describe that field, e.g. "proteomics or mass spectrometry".
+context_label: ""
+
+# Other facilities paid by the same funder. Funder-only sentences that name one of
+# them are excluded instead of reviewed, e.g. 'flow\s+cytometry|electron\s+microscopy'.
+other_facility_regex: ''
+
+# ----------------------------------------------------------------------------
+# 4. Scope check (optional)
+# ----------------------------------------------------------------------------
+# Use this when your field overlaps with another facility's, e.g. a proteomics facility
+# whose papers may also contain metabolomics done elsewhere. For every paper with a
+# facility sentence the tool decides what kind of work is credited and shows it in
+# the report column `column`:
+#   * the facility sentence names in-scope work                     -> counted
+#   * the facility sentence names only out-of-scope work            -> excluded
+#   * generic sentence + in-scope workflow in the paper              -> counted
+#     (>= in_scope_min_terms matches of in_scope_regex)
+#   * generic sentence + only out-of-scope work in the paper         -> Needs review
+# Counted papers that also report out-of-scope work are labelled
+# "<in_scope_label> + <out_of_scope_label> in paper".
+# The values below are a worked example (proteomics vs small-molecule MS).
+# Set enabled: true and adapt them, or leave enabled: false.
+scope_check:
+  enabled: false
+  # Report column heading.
+  column: "MS type"
+  in_scope_label: "Proteomics"
+  out_of_scope_label: "Small-molecule MS"
+  # Who does the out-of-scope work; shown in the report text.
+  out_of_scope_note: "metabolomics, lipidomics; run by another facility"
+  # Words that show in-scope work (stems are fine: 'proteom' matches proteomics, proteome).
+  in_scope_regex: 'proteom|peptide|tryp(?:sin|tic)|\bTMT\b|\bDIA\b|MaxQuant|Spectronaut|DIA[\s\-]*NN|FragPipe'
+  # Words that show out-of-scope work.
+  out_of_scope_regex: 'metabolom|lipidom|small[\s\-]+molecule\s+mass|metabolite\s+(?:profil|quantif|analys)|\bGC[\s\-]*MS\b'
+  # Names of the facilities that do the out-of-scope work (optional).
+  out_of_scope_facility_regex: 'metabolomics\s+(?:core|facility|platform|cent(?:re|er))|lipidomics\s+(?:core|facility)'
+  # How many matches in the paper count as "the paper describes this work".
+  in_scope_min_terms: 3
+  out_of_scope_min_terms: 3
+  # Examples quoted in the report's method text.
+  in_scope_examples: "trypsin, peptide, TMT, DIA, MaxQuant"
+
+# ----------------------------------------------------------------------------
+# 5. Papers co-authored by facility staff (optional)
+# ----------------------------------------------------------------------------
+# Off by default: only papers with a facility sentence are counted. When true, papers
+# where an author lists the facility as affiliation (but no facility sentence) are
+# also listed, in their own Inclusion basis. Most such papers come from research
+# groups that share the facility address, so check them.
+include_facility_authors: false
+
+# Phrases searched in author affiliations (PubMed, Europe PMC) when the above is true.
+affiliation_phrases: []
+
+# Affiliation phrases for OpenAlex (budget). null = the first affiliation phrase.
+openalex_affiliation_phrases: null
+
+# ----------------------------------------------------------------------------
+# 6. Output and run settings
+# ----------------------------------------------------------------------------
+
+# Where the reports go: <output_dir>/<year>/<report_slug>_<year>.md/.csv/.xlsx,
+# plus <output_dir>/README.md (overview) and an audit trail JSON.
+output_dir: "reports"
+
+# Download cache (full texts, last search results). Safe to delete; makes reruns fast.
+cache_dir: "cache"
+
+# PDFs you supply for papers whose full text is not open. Name each file after the DOI
+# with "/" replaced by "_", e.g. 10.1002_cam4.72386.pdf. Do not share this folder.
+pdf_dir: "pdfs"
+
+# Years to report when `ackfinder run` is given no --years. Empty = current year.
+years: []
+
+# Which year a paper belongs to: "first" = earliest publication date (online, print or
+# preprint posting); "issue" = the journal issue year.
+year_basis: "first"
+
+# Optional journal impact factor table (Clarivate JCR export, CSV or XLSX, with ISSN
+# and JIF columns). Licensed data: export your own. Without it the report shows an
+# OpenAlex-based "IF proxy" (2-year mean citedness).
+jif_table: null
+
+# Optional file with your own include/exclude decisions per DOI (YAML or CSV). The
+# tool applies them on every run, so you never edit the reports by hand. Format:
+# examples/manual_decisions.example.yaml. A missing file simply means no decisions.
+manual_decisions: "manual_decisions.yaml"
+
+# ----------------------------------------------------------------------------
+# 7. Fine-tuning (rarely needed)
+# ----------------------------------------------------------------------------
+
+# Similarity (0-1) needed for "Canonical statement": the larger of (a) the share of the
+# reference statement's content words found in the sentence and (b) Python difflib's
+# similarity ratio between the two word sequences.
+canonical_threshold: 0.85
+
+# Treat an abbreviation as its spelled-out words when scoring similarity, e.g.
+#   scilifelab: "scilifelab science life laboratory"
+word_expansions: {}
+
+# DOI prefixes of repositories that are neither journals nor preprint servers, so the
+# report lists them as "Other", e.g. "10.69622": "Karolinska Institutet Open Archive".
+other_doi_prefixes: {}

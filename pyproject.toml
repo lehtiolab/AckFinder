@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ackfinder"
+version = "1.0.0"
+description = "Find publications that acknowledge a core facility and write yearly reports"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Patrick Martin", email = "patrick.martin@ki.se" }]
+requires-python = ">=3.10"
+keywords = ["core facility", "acknowledgements", "bibliometrics", "Europe PMC", "OpenAlex"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "pandas>=2.0",
+    "requests>=2.31",
+    "lxml>=4.9",
+    "pypdf>=4.0",
+    "PyYAML>=6.0",
+    "XlsxWriter>=3.1",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes>=3"]
+
+[project.scripts]
+ackfinder = "ackfinder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ackfinder"]
+
+# the templates travel inside the package so `ackfinder init` works after `pip install`
+[tool.hatch.build.targets.wheel.force-include]
+"config.example.yaml" = "ackfinder/templates/config.example.yaml"
+".env.example" = "ackfinder/templates/.env.example"
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src", "tests", "examples", "skills",
+    "config.example.yaml", ".env.example", ".gitignore",
+    "LICENSE", "README.md", "AGENTS.md", "CLAUDE.md", "ALGORITHM.md",
+    "pixi.toml", "pixi.lock", "uv.lock",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
