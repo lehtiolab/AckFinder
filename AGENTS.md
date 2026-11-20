@@ -1,11 +1,15 @@
 # Agent instructions: AckFinder
 
-Instructions for AI coding agents (Claude Code, Codex, Cursor, Copilot, …). Humans: see [README.md](README.md).
+Instructions for AI assistants: coding agents (Claude Code, Codex, Cursor, Copilot, …) and chat apps that were
+given a link to this repository. Humans: see [README.md](README.md).
 
 This package finds publications that acknowledge a core facility and writes yearly reports. **The Python tool does
 the work. Your job is to set it up, run it, explain the results and, if asked, help review the uncertain papers.**
 The user may not be a programmer: run the commands for them, explain in plain words, and do not ask them to edit
 code.
+
+The README describes four routes. You serve route 3 (run the tool for the user) and, only when you cannot run the
+tool, route 4 (the no-code skill).
 
 ## Rules
 
@@ -24,6 +28,14 @@ code.
 
 ## Step 0: Make sure the tool runs
 
+| Where you are | Go to |
+|---|---|
+| In a copy of this repository on the user's computer, with a shell (coding agent) | 0a |
+| A chat app with a code sandbox; the user gave you the repository link | 0b |
+| You cannot run code at all | No-code fallback (end of this file) |
+
+### 0a: Coding agent
+
 ```bash
 ackfinder --version          # or: uv run ackfinder --version / pixi run ackfinder --version
 ```
@@ -39,9 +51,57 @@ If that fails, install it from this folder with whatever is available, in this o
 Check again with `ackfinder --version`. If Python is older than 3.10, or installs fail for lack of network, tell
 the user what is missing.
 
-Only if there is **no shell or no way to run Python at all** (for example a chat assistant without code
-execution), use the fallback skill `skills/ackfinder-no-code/SKILL.md`. Tell the user first that the result
-will be less complete and not reproducible.
+### 0b: Chat app sandbox
+
+The sandbox is temporary: files are gone when the chat ends, and network access may be limited. Do these steps
+before you ask the user any setup question.
+
+1. **Get the repository** and work inside it for the whole chat:
+
+   ```bash
+   git clone https://github.com/lehtiolab/AckFinder.git && cd AckFinder
+   ```
+
+   Without `git`, download and unzip `https://github.com/lehtiolab/AckFinder/archive/refs/heads/main.zip`.
+   Do not `pip install` straight from the link: you also need `examples/` and this file.
+
+2. **Install:** `pip install .`, then `ackfinder --version`.
+
+3. **Test the sources.** The tool needs these sites; a reply below 400 means reachable:
+
+   ```bash
+   python -c "
+   import requests
+   for u in ['https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=proteomics&format=json&pageSize=1',
+             'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi',
+             'https://api.openalex.org/works?per-page=1',
+             'https://api.biorxiv.org/details/biorxiv/10.1101/339747',
+             'https://www.biorxiv.org/', 'https://www.medrxiv.org/']:
+       try: print(requests.get(u, timeout=20, allow_redirects=False).status_code, u.split('/')[2])
+       except Exception as e: print('BLOCKED', u.split('/')[2], type(e).__name__)
+   "
+   ```
+
+   * **All reachable:** go on. Open-access PDFs come from publishers' own sites; if the sandbox allows only
+     listed sites, some of them will fail and those papers end up *Unverified*. Mention this in the summary.
+   * **Some blocked:** tell the user which sites. Explain that the chat app's code settings must allow them (in
+     the Claude app: Settings → Capabilities, network access for code execution; on Team and Enterprise plans an
+     admin sets it), and that they must start a new chat after changing it. Europe PMC (`www.ebi.ac.uk`) is
+     required. If only others are blocked, the user may choose a run with lower coverage (`--no-openalex`,
+     `--no-pmc`); say so in the summary.
+   * **The clone or install failed for lack of network, or nothing is reachable:** the tool cannot run here. Say
+     so, and offer the no-code fallback (if you can fetch web pages) or a coding agent on the user's computer.
+
+4. **Restore earlier work.** Ask whether the user has an `ackfinder_work.zip` from an earlier chat (Step 6). If
+   they upload it, unpack it into the repository folder; it holds `config.yaml`, `setup_answers.yaml`,
+   `manual_decisions.yaml` and earlier reports. Then go to Step 1.
+
+5. **Keys.** There is no `.env` here. Without an OpenAlex key, a shared cloud address often runs out of OpenAlex
+   budget. If the user wants to use a key, they can upload their `.env` file or paste the key; write it to `.env`
+   without repeating it back. Never put `.env` in the zip of Step 6.
+
+6. **Long commands.** If the sandbox stops `ackfinder run` before it ends, run the same command again: full texts
+   already downloaded are cached in `cache_dir`, so it continues where it stopped.
 
 ## Step 1: Is there a config?
 
@@ -131,8 +191,9 @@ Start from the matched sentences; open the full text only when they are not enou
 1. **Needs review:** for each paper, decide whether it credits *this* facility's work. Quote the sentence and its
    section. Propose include or exclude.
 2. **Unverified:** list them with DOI links. Ask the user to download the PDFs they can access into `pdf_dir`,
-   named after the DOI with `/` replaced by `_` (e.g. `10.1002_cam4.72386.pdf`). Do not try to get around
-   paywalls. The next run checks the PDFs.
+   named after the DOI with `/` replaced by `_` (e.g. `10.1002_cam4.72386.pdf`). In a chat app, the user uploads
+   them into the chat and you copy them into `pdf_dir` with those names. Do not try to get around paywalls. The
+   next run checks the PDFs.
 3. **Confirmed (spot check):** if there are 10 or fewer, check all; otherwise check every *Variant wording* paper,
    every paper whose scope label says "… in paper" (mixed work), and 3 *Canonical statement* papers. Check that
    the sentence names this facility (not a namesake elsewhere), sits in acknowledgements, methods or funding
@@ -166,6 +227,16 @@ impact-factor proxy, and the report paths. Add the caveats that apply:
 * If the report's *Method and coverage* table says OpenAlex was skipped or cut off, coverage is lower; an
   OpenAlex key helps.
 
+## Step 6 (chat apps only): Hand over the files
+
+The sandbox is deleted when the chat ends. Before you finish:
+
+1. Pack these into `ackfinder_work.zip`, with their folders: `config.yaml`, `setup_answers.yaml`,
+   `manual_decisions.yaml` (if present) and the output folder (reports, audit, your verification notes).
+   **Never include** `.env`, `cache_dir` or `pdf_dir`.
+2. Give the zip to the user as a download. Tell them to keep it and upload it at the start of their next chat
+   (Step 0b, item 4), and to keep their own copies of any PDFs they uploaded, since those are not in the zip.
+
 ## Reference
 
 | Command | Purpose |
@@ -184,6 +255,7 @@ impact-factor proxy, and the report paths. Add the caveats that apply:
 | `.env` | API keys | The user |
 | `manual_decisions.yaml` | Include/exclude decisions per DOI | Agent with user approval, or the user |
 | `<output_dir>/…` | Reports, overview, audit | Only the tool |
+| `ackfinder_work.zip` | Chat apps: the user's files between chats (Step 6) | Agent packs it; the user keeps it |
 
 **Troubleshooting**
 
@@ -192,15 +264,19 @@ impact-factor proxy, and the report paths. Add the caveats that apply:
 | `ackfinder: command not found` | Step 0; or `python -m ackfinder …` inside the environment |
 | `No config file at …` | Step 1 |
 | OpenAlex HTTP 429, or "OpenAlex skipped" in the report | Add `OPENALEX_API_KEY` to `.env`, or rerun later. `--no-openalex` skips it (lower coverage). |
+| Chat app: `BLOCKED` sites, or connection errors during the run | The sandbox's network settings block a source: Step 0b, item 3 |
+| Chat app: the run stopped before the end | Run the same command again; it reuses the downloaded full texts (Step 0b, item 6) |
 | A search phrase has 0 hits | Check the spelling with the user; remove the phrase if nobody uses it |
 | A paper the user knows about is missing | Look it up in the audit file. If it is there, its `reason` says why it was left out. If not, no index found it: add a manual `include` decision for its DOI (the tool then adds it as a candidate). |
 | A Confirmed paper is wrong | Manual `exclude` decision; if the pattern is the cause, discuss changing `facility_regex` and check with `classify` |
 
 ## No-code fallback
 
-Use `skills/ackfinder-no-code/SKILL.md` **only** when Step 0 fails because there is no way to run Python. It
-repeats the method with web requests and your own reading, and its output must be labelled as not produced by
-the tool. If Python becomes available later, rerun with the tool and use that result instead.
+Use `skills/ackfinder-no-code/SKILL.md` **only** when Step 0 fails: you cannot run code at all, or your chat app's
+sandbox cannot install the tool or reach Europe PMC (Step 0b). Tell the user first that the result will be less
+complete and not reproducible. The skill repeats the method with web requests and your own reading, and its
+output must be labelled as not produced by the tool. If the tool can run later, rerun with it and use that result
+instead.
 
 ## Changing the package itself
 

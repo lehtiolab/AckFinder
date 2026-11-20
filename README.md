@@ -11,7 +11,7 @@ same config and the same database contents give the same report.
 
 **Contents**
 
-1. [Three ways to use it](#1-three-ways-to-use-it)
+1. [Four ways to use it](#1-four-ways-to-use-it)
 2. [Install](#2-install)
 3. [Quick start](#3-quick-start)
 4. [Set up the config for your facility](#4-set-up-the-config-for-your-facility)
@@ -24,16 +24,39 @@ same config and the same database contents give the same report.
 
 ---
 
-## 1. Three ways to use it
+## 1. Four ways to use it
 
-| You are… | Do this |
-|---|---|
-| **Not into coding** | Open this folder in an AI coding agent (Claude Code, Codex, Cursor, Copilot agent, …) and say *"Set up and run the facility acknowledgement search."* The agent follows [`AGENTS.md`](AGENTS.md): it installs the tool, asks you about your facility, writes the config, runs the search and, if you want, helps you review the uncertain papers. |
-| **Comfortable with a terminal** | Install (section 2), run `ackfinder init --interactive`, answer the questions, then run `ackfinder run`. No code, no regular expressions. |
-| **A programmer** | Edit `config.yaml` directly, call the CLI from scripts or cron, or import the package (section 9). |
+| You… | Do this | You need |
+|---|---|---|
+| **1. Know Python** | Install (section 2), copy `config.example.yaml` (or the worked example `examples/config.cpms.yaml`) to `config.yaml`, fill it in, run `ackfinder run`. Script it, schedule it or import it (section 9). | Python 3.10+ |
+| **2. Can use a terminal, but don't code** | Install (section 2), run `ackfinder init --interactive`, answer the questions in plain words, then run `ackfinder run`. No regular expressions. | Python 3.10+ |
+| **3. Prefer to ask an AI assistant** | Give an AI assistant that can run code a link to this repository, or open the folder in it, and say *"Install AckFinder and run the facility acknowledgement search for me."* It follows [`AGENTS.md`](AGENTS.md): installs the tool, asks you the setup questions in the chat, writes the config, runs the search, explains the results and, if you want, helps you review the uncertain papers. | A coding agent, or a chat app whose code sandbox can reach the internet (see below) |
+| **4. Only have a chatbot that cannot run code** | Ask the same thing. The chatbot follows the fallback skill [`skills/ackfinder-no-code/`](skills/ackfinder-no-code/SKILL.md): it queries the same databases and reads the papers itself. | A chatbot with web access |
 
-All three use the same Python code and give the same results. The agent only adds the conversation and an
-optional second look at uncertain papers.
+Routes 1–3 run the same Python code and give the same results; the assistant in route 3 only adds the
+conversation and an optional second look at uncertain papers. Route 4 is a fallback: it covers fewer sources, two
+runs may differ, and its report is labelled *no-code*. Rerun with routes 1–3 when you can.
+
+### Route 3 in a chat app
+
+**Coding agents** (Claude Code, also available in the Claude desktop app; Codex; Cursor; Copilot agent; …)
+work on your own computer and keep your files, so they are the easiest choice.
+
+**Chat apps** (the Claude app, ChatGPT, …) run code in a temporary sandbox in the cloud. The tool works there if
+the sandbox may download the package and reach the databases:
+
+* **Network access.** The sandbox must reach `github.com`, `pypi.org`, `www.ebi.ac.uk`,
+  `eutils.ncbi.nlm.nih.gov`, `api.openalex.org`, `api.biorxiv.org`, `www.biorxiv.org` and `www.medrxiv.org`.
+  Open-access PDFs come from publishers' own sites, so allowing all sites gives the best coverage. In the Claude
+  app this is the network setting for code execution (Settings → Capabilities; on Team and Enterprise plans an
+  admin sets it). Some sandboxes have no internet at all (for example ChatGPT's built-in Python tool at the
+  time of writing); there the assistant uses route 4. The assistant tests the sites before it asks you anything.
+* **Files do not survive the chat.** At the end, the assistant gives you a zip of your config, your decisions and
+  the reports. Upload it at the start of your next chat so you do not have to answer the setup questions again.
+* **API keys.** Without a key, OpenAlex is often limited in a shared cloud sandbox. If you want to use one, upload
+  your `.env` file or paste the key; it then stays in that chat's history, so use only the free personal OpenAlex
+  key (section 5), which you can replace at any time.
+* **Paywalled papers.** Upload the PDFs you have access to into the chat; the assistant files them for the tool.
 
 ## 2. Install
 
@@ -325,12 +348,13 @@ print(result["years"][2025]["total"], result["overview"])
 `skills/`. Do **not** share `.env` (keys), `pdfs/` (copies of paywalled papers) or `cache/`; all three are in
 `.gitignore`. `config.yaml` holds no secrets, so you may share it.
 
-**AI agents.** [`AGENTS.md`](AGENTS.md) holds the agent instructions. Codex, Cursor, Copilot and most other coding
-agents read it automatically; Claude Code reads it through `CLAUDE.md`. The agent always runs the Python tool.
-Only when no Python environment exists at all (e.g. a chat-only assistant) does it fall back to the skill in
-[`skills/ackfinder-no-code/`](skills/ackfinder-no-code/SKILL.md), which repeats the method by hand and gives
-less complete, non-reproducible results. To make the skill available to Claude Code, copy the folder to
-`.claude/skills/` in your own project or to `~/.claude/skills/`.
+**AI assistants.** [`AGENTS.md`](AGENTS.md) holds the instructions for routes 3 and 4 (section 1). Codex, Cursor,
+Copilot and most other coding agents read it automatically; Claude Code reads it through `CLAUDE.md`; a chat app
+reads it when you give it the repository link. The assistant always runs the Python tool when it can, on your
+computer or in the chat app's sandbox. Only when it cannot run code, or its sandbox cannot reach the databases,
+does it fall back to the skill in [`skills/ackfinder-no-code/`](skills/ackfinder-no-code/SKILL.md), which
+repeats the method by hand and gives less complete, non-reproducible results. To make the skill available to
+Claude Code, copy the folder to `.claude/skills/` in your own project or to `~/.claude/skills/`.
 
 **Development.** `pip install -e ".[dev]"`, then `pytest` (offline tests) and `pyflakes src tests`.
 
