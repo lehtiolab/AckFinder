@@ -35,12 +35,15 @@ validate(cfg) → (errors, warnings)
     errors: required key empty, CHANGE_ME left, invalid regex, scope_check incomplete,
             bad years / year_basis / canonical_threshold, missing jif_table file
     warnings: facility_regex misses canonical_statement, a search phrase neither regex matches,
-              funding_label empty, facility authors on without affiliation_phrases, unknown keys
+              funding_label empty, removed keys (include_facility_authors), unknown keys
+    people:   parse_people(facility_staff / requesters) ─► Person(name, surname, given, orcid);
+              a malformed entry or ORCID is an error
 ```
 
 ## A run
 
-`cli.cmd_run` loads the config, turns options into `RunSettings.from_config(cfg, **overrides)` and calls
+`cli.cmd_run` loads the config, turns options into `RunSettings.from_config(cfg, **overrides)`, attaches a log
+file (`_attach_run_log` → `<output_dir>/run_log_<date>.txt`, which also gets the final results table) and calls
 `pipeline.run(cfg, settings)`. Every network call goes through `Http.get`, which paces requests per host, retries
 on HTTP 429 and 5xx (honouring Retry-After), caches downloads in `cache_dir`, and for search queries falls back to
 the last stored answer if the live query fails. A 429 whose Retry-After exceeds `Http.GIVE_UP_AFTER` (10 min) is not
@@ -60,7 +63,9 @@ pipeline.run(cfg, settings)
 │     │    └─ epmc_lookup("PMCID")    adds the Europe PMC record (authors, journal, dates)
 │     ├─ openalex_search(y0, y1)      OpenAlex fulltext.search, 100 per page; cursor paging only with a key;
 │     │    └─ epmc_lookup("DOI")      notes truncation; stops for the run on repeated 429
-│     ├─ [include_facility_authors]   pubmed_aff_search() + AFF: queries + OpenAlex raw affiliation strings
+│     ├─ [affiliation_phrases]        pubmed_aff_search() + AFF: queries + OpenAlex raw affiliation strings
+│     ├─ [facility_staff / requesters] epmc_author_search(): AUTH:"Surname Firstname" OR AUTHORID:"<orcid>", per person
+│     │                                openalex_author_search(): author.orcid:<a>|<b>…, ORCID entries only
 │     ├─ manual "include" DOIs        epmc_lookup("DOI") or a bare Item, so they are always candidates
 │     └─ _note()                      every query and its hit count (→ "Method and coverage" table, audit)
 │
@@ -94,12 +99,15 @@ pipeline.run(cfg, settings)
 │     │           names other_facility_regex or out-of-scope work → Excluded
 │     │           matches context_regex (or none set)             → Review
 │     ├─ facility_affiliations(rec) ─► jats_facility_authors()   facility in an author affiliation
+│     ├─ record_authors(rec) ─► match_people(authors, people)    staff_authors, requester_authors
+│     │     same surname + first name (initial if that is all there is); Europe PMC ORCIDs refine it
 │     ├─ status:
-│     │     Canonical/Variant found    → "Confirmed", then ms_type()
-│     │     only a facility author     → "Affiliation only"
-│     │     no full text               → "Unverified"
-│     │     Review sentence            → "Review"
-│     │     otherwise                  → "Excluded" (with reason)
+│     │     Canonical/Variant found                       → "Confirmed", then ms_type()
+│     │     facility listed as author (affiliation/staff) → "Confirmed", basis "Facility listed as author, no statement"
+│     │     found only by a name search, nobody matches   → "Excluded" (namesake)
+│     │     no full text                                  → "Unverified"
+│     │     Review sentence                               → "Review"
+│     │     otherwise (incl. requester without statement) → "Excluded" (with reason)
 │     ├─ ms_type(rec, blocks)  scope check (only if scope_check.enabled; Scope.from_cfg)
 │     │     ├─ _terms(in_scope_regex), _terms(out_of_scope_regex), out_of_scope_facility_regex
 │     │     ├─ facility sentence names in-scope work            → in_scope_label
@@ -112,7 +120,7 @@ pipeline.run(cfg, settings)
 │
 └─ 5  REPORT (per year)
       ├─ row_for(rec) ─► best_match(rec)      one flat dict per paper
-      │     rows       = Confirmed (+ Affiliation only with include_facility_authors)
+      │     rows       = Confirmed (Statement column: Yes / No / Not checked)
       │     side lists = Review, Unverified, Excluded
       ├─ report.write_reports(year, rows, side, cfg, settings, …)
       │     ├─ summarise(rows)                 totals, published/preprints, mean IF, scope counts

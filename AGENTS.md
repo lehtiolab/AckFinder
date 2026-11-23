@@ -16,7 +16,7 @@ tool, route 4 (the no-code skill).
 1. **Use the code.** Search, verification, counts and reports come from `ackfinder`. Do not count papers, build
    tables or write reports yourself while the tool can run. The no-code fallback (end of this file) is only for
    when no Python environment exists at all.
-2. **Never edit the files the tool writes** in `output_dir` (reports, CSV, XLSX, overview, audit). Corrections
+2. **Never edit the files the tool writes** in `output_dir` (reports, CSV, XLSX, overview, audit, run log). Corrections
    go in the manual decisions file (Step 4), then rerun. That keeps every change visible and repeatable.
 3. **Keys stay secret.** API keys live only in `.env` or environment variables. Never write them into
    `config.yaml`, code or chat output, and never print `.env`. `ackfinder check` reports keys only as set/not set.
@@ -132,7 +132,9 @@ and words. If they already have a facility config elsewhere, ask for it and use 
 | 6b | If yes: words showing a sentence is about your field (e.g. *proteom; mass spectromet*) | `field_terms` (list) | no |
 | 6c | If yes: other facilities paid by the same funder (e.g. *flow cytometry*) | `other_facilities` (list) | no |
 | 7 | Does your field overlap another facility's, so papers should be checked for which kind of work they credit (e.g. proteomics vs metabolomics)? If yes: column name, in-scope label and words, out-of-scope label and words, who does the out-of-scope work | `scope:` block (see `examples/setup_answers.example.yaml`) | no |
-| 8 | Also list papers where facility staff are only co-authors, with no facility statement? (default no) | `include_facility_authors` | no |
+| 8 | Also search author affiliations for the facility name? Such papers are listed even without a statement (default no) | `affiliation_search` | no |
+| 8b | Names of facility staff (e.g. *Jane Doe; Doe, John (0000-0002-1825-0097)*); their papers are listed even without a statement | `facility_staff` (list) | no |
+| 8c | Names of people who request the facility's services; their papers count only with a statement. Long lists can be pasted into `config.yaml` later | `requesters` (list) | no |
 | 9 | **Where should the reports be saved?** Suggest `reports/<short>_acknowledgements`. Relative paths are relative to the config file. | `output_dir` | yes (confirm) |
 | 10 | Which years should a run report by default? | `years` (list) | no |
 | 11 | Do you have a Clarivate JCR export for official impact factors? Path? | `jif_table` | no |
@@ -195,7 +197,9 @@ Start from the matched sentences; open the full text only when they are not enou
    them into the chat and you copy them into `pdf_dir` with those names. Do not try to get around paywalls. The
    next run checks the PDFs.
 3. **Confirmed (spot check):** if there are 10 or fewer, check all; otherwise check every *Variant wording* paper,
-   every paper whose scope label says "… in paper" (mixed work), and 3 *Canonical statement* papers. Check that
+   every paper whose scope label says "… in paper" (mixed work), every paper whose *Statement* column says *No* or
+   *Not checked* (facility listed as author: is the named author really facility staff, not a namesake or a
+   research group at the same address?), and 3 *Canonical statement* papers. Check that
    the sentence names this facility (not a namesake elsewhere), sits in acknowledgements, methods or funding
    (not references), and that a preprint and its published version are not both counted.
 4. **Excluded:** skim the reasons and flag any that look wrong.
@@ -254,7 +258,7 @@ The sandbox is deleted when the chat ends. Before you finish:
 | `setup_answers.yaml` | Interview answers that produced the config | Agent, during Step 2 |
 | `.env` | API keys | The user |
 | `manual_decisions.yaml` | Include/exclude decisions per DOI | Agent with user approval, or the user |
-| `<output_dir>/…` | Reports, overview, audit | Only the tool |
+| `<output_dir>/…` | Reports, overview, audit, run log | Only the tool |
 | `ackfinder_work.zip` | Chat apps: the user's files between chats (Step 6) | Agent packs it; the user keeps it |
 
 **Troubleshooting**

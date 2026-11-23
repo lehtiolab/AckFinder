@@ -8,6 +8,7 @@ setup_answers.yaml
 cache/
 pdfs/
 reports/
+report/
 
 # Environments and build artefacts
 .venv/

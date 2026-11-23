@@ -10,6 +10,8 @@ import json
 import os
 import re
 import textwrap
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +34,17 @@ DEFAULTS: dict[str, Any] = {
     "funding_regex": "", "funding_label": "", "context_regex": "", "context_label": "",
     "other_facility_regex": "",
     "scope_check": {"enabled": False},
-    "include_facility_authors": False,
+    "facility_staff": [], "requesters": [],
     "affiliation_phrases": [], "openalex_affiliation_phrases": None,
     "output_dir": "reports", "cache_dir": "cache", "pdf_dir": "pdfs",
     "years": [], "year_basis": "first", "jif_table": None, "manual_decisions": None,
     "canonical_threshold": 0.85, "word_expansions": {}, "other_doi_prefixes": {},
 }
+
+# Keys that older configs may still carry: ignored, with this explanation.
+REMOVED_KEYS = {"include_facility_authors": "author searches now run whenever facility_staff, requesters or "
+                                            "affiliation_phrases has entries"}
+PEOPLE_KEYS = ("facility_staff", "requesters")
 
 # Text that marks a value as not filled in yet (the template uses these).
 PLACEHOLDER_RX = re.compile(r"CHANGE[_ ]ME|<[A-Z][A-Z _/-]+>")
@@ -123,7 +130,7 @@ def load_config(path: Path) -> dict:
     cfg["_config_path"] = path.resolve()
     base = path.resolve().parent
     cfg["_config_dir"] = base
-    for k in ("search_phrases", "affiliation_phrases", "years"):
+    for k in ("search_phrases", "affiliation_phrases", "years") + PEOPLE_KEYS:
         if isinstance(cfg.get(k), str):
             cfg[k] = [cfg[k]]
         cfg[k] = list(cfg.get(k) or [])
@@ -185,6 +192,8 @@ def validate(cfg: dict) -> tuple[list[str], list[str]]:
             errors.append(f"`years` must be a list of years such as [2025, 2026]; got {y!r}")
     if cfg.get("jif_table") and not Path(cfg["jif_table"]).is_file():
         errors.append(f"`jif_table` points to a missing file: {cfg['jif_table']}")
+    for k in PEOPLE_KEYS:
+        errors += parse_people(cfg.get(k), k)[1]
     # a missing manual_decisions file is fine: it means no decisions yet
     if errors:
         return errors, warnings
@@ -200,12 +209,141 @@ def validate(cfg: dict) -> tuple[list[str], list[str]]:
                             "only by it can never be confirmed")
     if cfg.get("funding_regex") and not cfg.get("funding_label"):
         warnings.append("`funding_label` is empty; reports will say 'the funding body'")
-    if cfg.get("include_facility_authors") and not cfg.get("affiliation_phrases"):
-        warnings.append("`include_facility_authors` is on but `affiliation_phrases` is empty")
-    unknown = sorted(set(cfg.get("_raw_keys", [])) - set(DEFAULTS) - set(REQUIRED))
+    for k in REMOVED_KEYS:
+        if k in cfg.get("_raw_keys", []):
+            warnings.append(f"`{k}` is no longer used ({REMOVED_KEYS[k]}); remove it")
+    unknown = sorted(set(cfg.get("_raw_keys", [])) - set(DEFAULTS) - set(REQUIRED) - set(REMOVED_KEYS))
     if unknown:
         warnings.append(f"unknown keys (ignored; check the spelling): {', '.join(unknown)}")
     return errors, warnings
+
+
+# --------------------------------------------------------------------------- people (author lists)
+ORCID_RX = re.compile(r"\b(\d{4}-\d{4}-\d{4}-\d{3}[\dX])\b", re.I)
+# lower-case words that belong to the surname: "Ludwig van Beethoven" -> surname "van Beethoven"
+SURNAME_PARTICLES = {"van", "von", "der", "den", "de", "del", "della", "di", "da", "du", "dos", "das", "le", "la",
+                     "ten", "ter", "zu", "af"}
+_FOLD = str.maketrans({"ø": "o", "æ": "ae", "ß": "ss", "ł": "l", "đ": "d", "œ": "oe", "ð": "d", "þ": "th",
+                       "ı": "i"})
+
+
+def fold(s: str) -> str:
+    """Lower case without accents: 'Lehtiö' -> 'lehtio', 'Ørsted' -> 'orsted'."""
+    s = unicodedata.normalize("NFKD", str(s).lower().translate(_FOLD))
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def name_key(s: str) -> str:
+    """Surname key for matching: folded, letters only ('García-Márquez' -> 'garciamarquez')."""
+    return re.sub(r"[^a-z]", "", fold(s))
+
+
+def given_key(given: str) -> str:
+    """First given name for matching ('jane'), or its initial when only initials are known ('JA' -> 'j')."""
+    tok = next((t for t in re.split(r"[\s.\-‐]+", given.strip()) if t), "")
+    if re.fullmatch(r"[A-Z]{1,3}", tok):
+        tok = tok[0]
+    return name_key(tok)
+
+
+def given_matches(a: str, b: str) -> bool:
+    """Two given_key values agree: same initial if either is only an initial, else one is a prefix of
+    the other ('chris' / 'christopher')."""
+    if not a or not b:
+        return False
+    if len(a) == 1 or len(b) == 1:
+        return a[0] == b[0]
+    return a.startswith(b) or b.startswith(a)
+
+
+def split_name(name: str) -> tuple[str, str]:
+    """(surname, given names) from 'Jane A. Doe', 'Doe, Jane' or 'Doe JA' (PubMed style)."""
+    name = " ".join(name.replace(".", " ").split()).strip(" ,")
+    if "," in name:
+        last, given = name.split(",", 1)
+        return last.strip(), given.strip()
+    words = name.split()
+    if len(words) < 2:
+        return name, ""
+    n = 0                                                   # 'Doe JA' / 'Doe J A': initials last
+    while n < len(words) - 1 and re.fullmatch(r"[A-Z]{1,3}", words[-1 - n]):
+        n += 1
+    if n:
+        return " ".join(words[:-n]), " ".join(words[-n:])
+    i = len(words) - 1
+    while i > 1 and words[i - 1].lower() in SURNAME_PARTICLES:
+        i -= 1
+    return " ".join(words[i:]), " ".join(words[:i])
+
+
+@dataclass(frozen=True)
+class Person:
+    """One entry of `facility_staff` or `requesters`."""
+    name: str                 # as written in the config (without the ORCID)
+    surname: str              # as written, e.g. 'van Beethoven'
+    given: str
+    orcid: str | None = None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """(surname key, first given name or initial): compared with a paper's authors by `given_matches`."""
+        return name_key(self.surname), given_key(self.given)
+
+    @property
+    def query_name(self) -> str:
+        """Europe PMC author search form: surname + first given name ('Cao Xiaofang'), which is far more
+        precise than surname + initial ('Cao X'); the initial only when the config gives no more."""
+        first = next((t for t in re.split(r"[\s.\-‐]+", self.given) if t), "")
+        if len(first) > 1 and not re.fullmatch(r"[A-Z]{1,3}", first):
+            return f"{self.surname} {first}"
+        return f"{self.surname} {first[:1].upper()}".strip()
+
+
+def norm_orcid(v: Any) -> str | None:
+    m = ORCID_RX.search(str(v or ""))
+    return m.group(1).upper() if m else None
+
+
+def parse_person(entry: Any) -> Person:
+    """'Jane Doe', 'Doe, Jane', 'Jane Doe (0000-0002-1825-0097)' or {name: ..., orcid: ...}. Raises ValueError."""
+    if isinstance(entry, dict):
+        name, orcid_text = str(entry.get("name") or "").strip(), str(entry.get("orcid") or "").strip()
+    else:
+        text = str(entry or "")
+        m = ORCID_RX.search(text)
+        orcid_text = m.group(1) if m else ""
+        name = re.sub(r"[()\[\]]", " ", ORCID_RX.sub(" ", text)).strip(" ,;")
+        name = " ".join(name.split())
+    orcid = norm_orcid(orcid_text)
+    if orcid_text and not orcid:
+        raise ValueError(f"{orcid_text!r} is not an ORCID (format 0000-0002-1825-0097)")
+    if re.search(r"\d", name):
+        raise ValueError(f"{name!r}: unexpected digits (write the ORCID as 0000-0002-1825-0097)")
+    surname, given = split_name(name)
+    if not name_key(surname) or not name_key(given):
+        raise ValueError(f"{name!r}: write first and last name, e.g. 'Jane Doe' or 'Doe, Jane'")
+    return Person(name=name, surname=surname, given=given, orcid=orcid)
+
+
+def parse_people(entries: Any, key: str = "people") -> tuple[list[Person], list[str]]:
+    """Parse a config list of people. Returns (people, error messages); bad entries are left out."""
+    if isinstance(entries, (str, dict)):
+        entries = [entries]
+    people, errors = [], []
+    for i, e in enumerate(entries or [], 1):
+        try:
+            people.append(parse_person(e))
+        except ValueError as ex:
+            errors.append(f"`{key}` entry {i}: {ex}")
+    return people, errors
+
+
+def _person_text(entry: Any) -> str:
+    """An answers-file entry as one config line: 'Jane Doe (0000-0002-1825-0097)'."""
+    if isinstance(entry, dict):
+        name, orcid = str(entry.get("name") or "").strip(), str(entry.get("orcid") or "").strip()
+        return f"{name} ({orcid})" if orcid else name
+    return " ".join(str(entry).split())
 
 
 # --------------------------------------------------------------------------- building a config
@@ -255,8 +393,8 @@ def build_config(answers: dict) -> dict:
       acknowledgement_statement, funding_body, field_terms, other_facilities,
       scope (in_scope_label, in_scope_terms, out_of_scope_label, out_of_scope_terms,
              out_of_scope_note, out_of_scope_facilities, column),
-      include_facility_authors, output_dir, cache_dir, pdf_dir, years, year_basis, jif_table,
-      manual_decisions, report_slug
+      affiliation_search, facility_staff, requesters, output_dir, cache_dir, pdf_dir, years,
+      year_basis, jif_table, manual_decisions, report_slug
     """
     name = str(answers.get("facility_name") or "").strip()
     statement = " ".join(str(answers.get("acknowledgement_statement") or "").split())
@@ -302,10 +440,13 @@ def build_config(answers: dict) -> dict:
         }
     else:
         cfg["scope_check"] = {"enabled": False}
-    inc = bool(answers.get("include_facility_authors", False))
-    cfg["include_facility_authors"] = inc
-    cfg["affiliation_phrases"] = names if inc else []
-    cfg["openalex_affiliation_phrases"] = names[:1] if inc else []
+    # `include_facility_authors` is the old name of `affiliation_search`
+    aff = bool(answers.get("affiliation_search", answers.get("include_facility_authors", False)))
+    cfg["affiliation_phrases"] = names if aff else []
+    cfg["openalex_affiliation_phrases"] = names[:1] if aff else []
+    for k in PEOPLE_KEYS:
+        cfg[k] = [_person_text(x) for x in (_list(answers.get(k)) if not isinstance(answers.get(k), list)
+                                            else answers[k]) if x]
     cfg["output_dir"] = answers.get("output_dir") or f"reports/{cfg['report_slug']}"
     cfg["cache_dir"] = answers.get("cache_dir") or "cache"
     cfg["pdf_dir"] = answers.get("pdf_dir") or "pdfs"

@@ -53,3 +53,17 @@ def test_cli_template_init_needs_editing(tmp_path, capsys):
     assert "CHANGE_ME" in capsys.readouterr().out
     assert cli.main(["check", "-c", str(p)]) == 1
     assert cli.main(["run", "-c", str(tmp_path / "nope.yaml")]) == 1
+
+
+def test_run_log_file(tmp_path):
+    import logging
+    path = cli._attach_run_log(tmp_path / "out", "2026-01-01")
+    try:
+        logging.getLogger("ackfinder").warning("hello from the run")
+    finally:
+        for h in list(logging.getLogger().handlers):
+            if getattr(h, "baseFilename", None) == str(path):
+                logging.getLogger().removeHandler(h)
+                h.close()
+    assert path.name == "run_log_2026-01-01.txt"
+    assert "hello from the run" in path.read_text()

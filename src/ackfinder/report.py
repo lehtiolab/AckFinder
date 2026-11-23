@@ -31,38 +31,50 @@ def _median(xs):
     return statistics.median(xs) if xs else None
 
 
-def paper_cols(scope: Scope | None) -> list[tuple[str, str]]:
+def _lists(cfg: dict | None) -> tuple[bool, bool]:
+    """(facility_staff set, requesters set)."""
+    cfg = cfg or {}
+    return bool(cfg.get("facility_staff")), bool(cfg.get("requesters"))
+
+
+def paper_cols(scope: Scope | None, cfg: dict | None = None) -> list[tuple[str, str]]:
     """Column name in the row dicts -> header in the Excel / CSV files."""
+    staff, req = _lists(cfg)
     cols = [
         ("title", "Title"), ("doi", "DOI"), ("first_author", "First author"), ("last_author", "Last author"),
         ("journal", "Journal"), ("kind", "Type"), ("ms_type", scope.column if scope else None),
-        ("inclusion_basis", "Inclusion basis"),
-        ("facility_authors", "Facility author(s)"), ("if_proxy", "IF proxy (OpenAlex 2-yr mean citedness)"),
+        ("inclusion_basis", "Inclusion basis"), ("has_statement", "Facility statement"),
+        ("facility_authors", "Facility author(s)"), ("requester_authors", "Requester author(s)" if req else None),
+        ("if_proxy", "IF proxy (OpenAlex 2-yr mean citedness)"),
         ("jif", "JIF (Clarivate)"), ("jif_year", "JIF year"), ("first_pub_date", "First published"),
         ("issue_year", "Issue year"), ("statement_type", "Statement wording"),
         ("similarity", "Similarity to reference statement"), ("sections", "Statement section(s)"),
         ("section_paths", "Section path(s)"), ("statement_text", "Statement as found"),
         ("ms_evidence", scope.evidence_column if scope else None),
         ("facility_affiliation", "Facility affiliation as found"), ("facility_aff_source", "Affiliation seen in"),
-        ("fulltext_source", "Full-text source"), ("found_by", "Found by"), ("pmid", "PMID"), ("pmcid", "PMCID"),
+        ("fulltext_source", "Full-text source"), ("found_by", "Found by"),
+        ("author_search_only", "Found only by author search" if staff or req else None),
+        ("pmid", "PMID"), ("pmcid", "PMCID"),
         ("published_version", "Published version (preprints)"), ("n_authors", "No. of authors"), ("reason", "Note"),
     ]
     return [(k, h) for k, h in cols if h]
 
 
-def side_cols(scope: Scope | None) -> list[tuple[str, str]]:
+def side_cols(scope: Scope | None, cfg: dict | None = None) -> list[tuple[str, str]]:
     cols = [
         ("title", "Title"), ("doi", "DOI"), ("journal", "Journal"), ("kind", "Type"),
         ("first_pub_date", "First published"), ("found_by", "Found by"), ("fulltext_source", "Full-text source"),
         ("reason", "Note"), ("statement_text", "Sentence found"), ("section_paths", "Section path(s)"),
     ]
+    if _lists(cfg)[1]:
+        cols.insert(4, ("requester_authors", "Requester author(s)"))
     return cols + ([("ms_evidence", scope.evidence_column)] if scope else [])
 
 
-MEMBER_COLS = ("inclusion_basis", "facility_authors", "facility_affiliation", "facility_aff_source")
 COL_WIDTHS = {"Title": 60, "Statement as found": 70, "Facility affiliation as found": 50, "Sentence found": 70,
               "Section path(s)": 30, "Found by": 40, "Note": 50, "Journal": 28, "DOI": 30, "First author": 22,
-              "Last author": 22, "Inclusion basis": 30, "Facility author(s)": 30, "Affiliation seen in": 24}
+              "Last author": 22, "Inclusion basis": 30, "Facility author(s)": 30, "Affiliation seen in": 24,
+              "Requester author(s)": 30, "Facility statement": 12}
 
 
 def summarise(rows: list[dict], use_jif: bool, scope: Scope | None) -> dict:
@@ -96,8 +108,43 @@ def summarise(rows: list[dict], use_jif: bool, scope: Scope | None) -> dict:
         ms_mixed=sum(r["ms_type"] == scope.mixed for r in scoped) if scope else 0,
         ms_unknown=sum(r["ms_type"] == scope.unknown for r in scoped) if scope else 0,
         by_section={c: sum(c in secs(r) for r in stmt) for c in CATEGORY_ORDER if any(c in secs(r) for r in stmt)},
+        found_only_by_staff=sum("staff" in r.get("author_search_only", "") for r in rows),
+        found_only_by_requester=sum("requester" in r.get("author_search_only", "") for r in rows),
+        with_requester=sum(bool(r.get("requester_authors")) for r in rows),
         use_jif=use_jif,
     )
+
+
+def _statement_cell(r: dict) -> str:
+    """'Yes, canonical' / 'Yes, variant' / 'No' / 'Not checked' for the papers table."""
+    if r["has_statement"] != "Yes":
+        return r["has_statement"]
+    return "Yes, " + lcfirst(r["statement_type"].replace(" statement", "").replace(" wording", "") or "found")
+
+
+def _search_rows(status: list[dict]) -> list[dict]:
+    """The search table, with the per-person author queries summed into one row per list."""
+    out: list[dict] = []
+    groups: dict[tuple, dict] = {}
+    for s in status:
+        if not (s["source"] == "Europe PMC" and s["field"].startswith("author (")):
+            out.append(s)
+            continue
+        g = groups.get((s["source"], s["field"]))
+        if g is None:
+            g = groups[(s["source"], s["field"])] = dict(source=s["source"], field=s["field"], n=0, hits=0,
+                                                         zero=[], failed=0)
+            out.append(g)
+        g["n"] += 1
+        g["hits"] += s["hits"] or 0
+        g["zero"] += [s["phrase"]] if s["hits"] == 0 else []
+        g["failed"] += s["hits"] is None or str(s["note"]).startswith("failed")
+    for g in groups.values():
+        notes = ([f"no hits: {', '.join(g['zero'][:10])}" + (" …" if len(g["zero"]) > 10 else "")] if g["zero"]
+                 else []) + ([f"{g['failed']} queries failed"] if g["failed"] else [])
+        g.update(phrase=f"{g.pop('n')} people (name, and ORCID when given)", note="; ".join(notes))
+        del g["zero"], g["failed"]
+    return out
 
 
 def _doi_md(doi: str) -> str:
@@ -123,11 +170,11 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
                   outdir: Path, run_info: dict) -> dict:
     """Write <slug>_<year>.md/.csv/.xlsx into `outdir` and return the summary numbers.
 
-    `settings` needs: year_basis, statement_only, jif_table.
+    `settings` needs: year_basis, jif_table.
     """
     outdir.mkdir(parents=True, exist_ok=True)
     scope = Scope.from_cfg(cfg)
-    statement_only = settings.statement_only
+    staff, req = _lists(cfg)
     slug = cfg["report_slug"]
     S = summarise(rows, use_jif=bool(settings.jif_table), scope=scope)
     rows = sorted(rows, key=lambda r: (r["kind"] != "Published article", r["kind"], r["first_pub_date"] or "",
@@ -138,10 +185,12 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
 
     # ---------------- markdown
     intro = ("A paper is included when its full text names the facility in the acknowledgements, funding statement "
-             "or methods" + ("" if statement_only else f" (*{BASIS_STATEMENT}*)")
-             + ("" if statement_only else
-                f", or when an author lists the facility as their affiliation (*{BASIS_MEMBER}*)")
-             + "." + ("" if statement_only else " The *Inclusion basis* column says which applies to each paper."))
+             f"or methods (*{BASIS_STATEMENT}*), or when the facility is listed as author: an author's affiliation "
+             "names the facility" + (", or an author is on the facility staff list" if staff else "")
+             + f" (*{BASIS_MEMBER}* when the paper has no facility statement). The *Statement* column says whether "
+             "a facility statement was found: *Yes*, *No*, or *Not checked* (full text not available).")
+    if req:
+        intro += " Papers by the listed requesters were searched too; they count only with a facility statement."
     if scope:
         intro += (f" Papers whose credited work is {scope.out_text} are left out; the *{scope.column}* column gives "
                   "the call for each paper.")
@@ -165,16 +214,21 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     L.append(f"| Mean impact factor, open proxy: OpenAlex 2-yr mean citedness (n = {S['n_if_proxy']} of "
              f"{S['published']} published) | {fmt_num(S['mean_if_proxy'], 2)} "
              f"(median {fmt_num(S['median_if_proxy'], 2)}) |")
-    if not statement_only:
-        L.append(f"| Inclusion basis: facility statement in acknowledgements/funding/methods | {S['with_statement']} "
-                 f"(of which {S['statement_and_member']} also list a core facility member as author) |")
-        extra = f"; {S['member_only_unchecked']} without full text to check" if S["member_only_unchecked"] else ""
-        L.append(f"| Inclusion basis: core facility member listed as author, no facility statement | "
-                 f"{S['member_only']} ({S['member_only_published']} published, {S['member_only_preprints']} "
-                 f"preprints{extra}) |")
-        if S["member_only"]:
-            L.append(f"| Mean IF proxy, papers with a facility statement only (n = {S['n_if_proxy_statement']}) | "
-                     f"{fmt_num(S['mean_if_proxy_statement'], 2)} |")
+    L.append(f"| With a facility statement (acknowledgements/funding/methods) | {S['with_statement']} "
+             f"(of which {S['statement_and_member']} also list the facility as author) |")
+    extra = f"; {S['member_only_unchecked']} not checked: no full text" if S["member_only_unchecked"] else ""
+    L.append(f"| Facility listed as author, **no** facility statement | "
+             f"{S['member_only']} ({S['member_only_published']} published, {S['member_only_preprints']} "
+             f"preprints{extra}) |")
+    if S["member_only"]:
+        L.append(f"| Mean IF proxy, papers with a facility statement only (n = {S['n_if_proxy_statement']}) | "
+                 f"{fmt_num(S['mean_if_proxy_statement'], 2)} |")
+    if staff or req:
+        L.append("| Found only by the author searches (the phrase searches missed them) | "
+                 + "; ".join(([f"staff list: {S['found_only_by_staff']}"] if staff else [])
+                             + ([f"requester list: {S['found_only_by_requester']}"] if req else [])) + " |")
+    if req:
+        L.append(f"| With a listed requester as author | {S['with_requester']} |")
     if S["manual"]:
         L.append(f"| Included by manual decision | {S['manual']} |")
     L.append(f"| Statement wording: canonical / variant | {S['canonical']} / {S['variant']} |")
@@ -194,8 +248,8 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     hdr = ["#", "Title", "DOI", "First author", "Last author", "Journal", "Type", "IF proxy"]
     if S["use_jif"]:
         hdr.append("JIF")
-    hdr += ([scope.column] if scope else []) + ([] if statement_only else ["Inclusion basis", "Facility author(s)"])
-    hdr += ["Statement", "Section"]
+    hdr += ([scope.column] if scope else []) + ["Inclusion basis", "Facility author(s)"]
+    hdr += (["Requester(s)"] if req else []) + ["Statement", "Section"]
     L.append("| " + " | ".join(hdr) + " |")
     L.append("|" + "---|" * len(hdr))
     for i, r in enumerate(rows, 1):
@@ -204,13 +258,12 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
                  r["kind"].replace("Published article", "Article"), fmt_num(r["if_proxy"], 1)]
         if S["use_jif"]:
             cells.append(fmt_num(r["jif"], 1))
-        stype = r["statement_type"].replace(" statement", "").replace(" wording", "") or "–"
-        section = r["sections"] if r["inclusion_basis"] != BASIS_MEMBER else "Author affiliations"
+        section = r["sections"] if r["inclusion_basis"] != BASIS_MEMBER else (r["facility_aff_source"] or "Authors")
         if scope:
             cells += [r["ms_type"] or "–"]
-        if not statement_only:
-            cells += [r["inclusion_basis"], md_escape(r["facility_authors"])]
-        cells += [stype, md_escape(section) or "–"]
+        cells += [r["inclusion_basis"], md_escape(r["facility_authors"])]
+        cells += ([md_escape(r["requester_authors"])] if req else [])
+        cells += [_statement_cell(r), md_escape(section) or "–"]
         L.append("| " + " | ".join(cells) + " |")
     L.append("")
 
@@ -218,8 +271,10 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     for i, r in enumerate(rows, 1):
         t = f"*{md_escape(r['title'][:90])}{'…' if len(r['title']) > 90 else ''}*"
         if r["inclusion_basis"] == BASIS_MEMBER:
-            who = f"; {r['facility_authors']}" if r["facility_authors"] else ""
-            L.append(f"{i}. {t} (author affiliation{who}): \"{md_escape(r['facility_affiliation'])}\"")
+            aff = md_escape(r["facility_affiliation"])
+            if not aff.startswith("Author on the facility staff list"):
+                aff = f"author affiliation: \"{aff}\""
+            L.append(f"{i}. {t} (facility listed as author, no statement): {aff}")
         elif r["inclusion_basis"] == BASIS_MANUAL:
             L.append(f"{i}. {t} (manual decision): {md_escape(r['reason'])}")
         else:
@@ -229,8 +284,8 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     for key, head, note in [
         ("review", "Needs manual review", _review_note(cfg, scope)),
         ("unverified", "Index hits that could not be verified",
-         "A search index matched the phrase, but the full text could not be downloaded (usually paywalled) and no "
-         "author lists the facility as an affiliation in the database records. Put the PDFs in the folder set as "
+         "A search index matched the phrase (or a listed requester is an author), but the full text could not be "
+         "downloaded (usually paywalled) and the facility is not listed as author. Put the PDFs in the folder set as "
          "`pdf_dir` in the config (file name = DOI with `/` replaced by `_`) and re-run to resolve them."),
     ]:
         if side[key]:
@@ -247,7 +302,7 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     L.append(f"Searches run {run_info['date']}; {run_info['n_candidates']} unique candidate records across all "
              "years searched.\n")
     L.append("| Source | Searched in | Phrase | Hits | Note |\n|---|---|---|---|---|")
-    for s in run_info["search_status"]:
+    for s in _search_rows(run_info["search_status"]):
         L.append(f"| {s['source']} | {s['field']} | {md_escape(s['phrase'])} | "
                  f"{'' if s['hits'] is None else s['hits']} | {md_escape(s['note'])} |")
     L.append("")
@@ -259,14 +314,24 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
         f"statement's content words, or the two word sequences have a similarity ratio (Python `difflib`) of at "
         f"least {thr:.2f}. *Variant* = the facility is named with other wording.",
     ]
-    if not statement_only:
+    method.append(
+        "- **Facility listed as author**: an author's affiliation names the facility, in the full-text author list "
+        "or in the Europe PMC/PubMed or OpenAlex records"
+        + (", or an author is on the facility staff list (`facility_staff`)" if staff else "")
+        + f". These papers are included even without a facility statement (*{BASIS_MEMBER}*). The tool does not "
+        "check whether an author with the facility affiliation is facility staff or a member of a research group "
+        "that shares the address, and a staff-list match is by name, so check the *Facility author(s)* column. "
+        "When the full text was not available the acknowledgements could not be read (*Not checked*).")
+    if staff or req:
         method.append(
-            f"- **{BASIS_MEMBER}**: an author's affiliation names the facility, in the full-text author list or in "
-            "the Europe PMC/PubMed or OpenAlex records. These papers are included even without a facility statement. "
-            "The tool does not check whether each named author is facility staff or a member of a research group "
-            "that uses the facility affiliation; the *Facility author(s)* column lists them so this can be checked. "
-            "When the full text was not available, the acknowledgements could not be read, so some of these papers "
-            "may also carry a facility statement.")
+            "- **Author searches**: each person in the "
+            + " and ".join(x for x, on in (("facility staff list", staff), ("requester list", req)) if on)
+            + " was searched in Europe PMC by name (surname and first name), and also by ORCID (Europe PMC "
+            "and OpenAlex) when one is given. A paper matches a person when an author has the same surname and first "
+            "name, or first initial when only initials are known (accents ignored); an ORCID in Europe PMC's author record refines this (same ORCID: a match "
+            "whatever the spelling; different ORCID: a namesake). "
+            + ("Papers by requesters count only with a facility statement. " if req else "")
+            + "Papers found only by a name search where no listed person is an author are excluded as namesakes.")
     if scope:
         lin, lout = lcfirst(scope.in_label), lcfirst(scope.out_label)
         ex = f" such as {scope.in_examples}" if scope.in_examples else ""
@@ -290,7 +355,8 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
         "in the config to a JCR export.",
         "- **Coverage limits**: full-text indexes cover open-access papers, PMC author manuscripts, and the preprints "
         "and paywalled papers that OpenAlex has indexed. A paywalled paper whose full text is in none of these indexes "
-        "is only found if a facility member is an author, so the counts are a lower bound.",
+        "is found only through the author or affiliation searches, and counts only if the facility is listed as "
+        "author or its PDF is added, so the counts are a lower bound.",
         "- **Deduplication**: records are merged on DOI, PMCID, PMID and title. A preprint and its published version "
         "are listed separately; the *Published version* column in the Excel file links them.",
     ]
@@ -298,8 +364,7 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     (outdir / f"{slug}_{year}.md").write_text("\n".join(L), encoding="utf-8")
 
     # ---------------- excel + csv
-    keep = [(k, h) for k, h in paper_cols(scope) if (S["use_jif"] or k not in ("jif", "jif_year"))
-            and not (statement_only and k in MEMBER_COLS)]
+    keep = [(k, h) for k, h in paper_cols(scope, cfg) if (S["use_jif"] or k not in ("jif", "jif_year"))]
     df = pd.DataFrame([{h: r.get(k, "") for k, h in keep} for r in rows], columns=[h for _, h in keep])
     df.insert(0, "#", range(1, len(df) + 1))
     df.to_csv(outdir / f"{slug}_{year}.csv", index=False)
@@ -315,13 +380,17 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     if S["use_jif"]:
         summary_rows += [("Mean JIF (Clarivate)", S["mean_jif"]), ("Median JIF", S["median_jif"]),
                          ("n with JIF", S["n_jif"])]
-    if not statement_only:
-        summary_rows += [(f"Inclusion basis: {BASIS_STATEMENT} (incl. with facility member)", S["with_statement"]),
-                         (f"  of which also {BASIS_MEMBER.lower()}", S["statement_and_member"]),
-                         (f"Inclusion basis: {BASIS_MEMBER} only", S["member_only"]),
-                         ("  published / preprints", f"{S['member_only_published']} / {S['member_only_preprints']}"),
-                         ("  without full text to check acknowledgements", S["member_only_unchecked"]),
-                         ("Mean IF proxy, facility-statement papers only", S["mean_if_proxy_statement"])]
+    summary_rows += [("With a facility statement", S["with_statement"]),
+                     ("  of which also facility listed as author", S["statement_and_member"]),
+                     (f"{BASIS_MEMBER}", S["member_only"]),
+                     ("  published / preprints", f"{S['member_only_published']} / {S['member_only_preprints']}"),
+                     ("  not checked: no full text", S["member_only_unchecked"]),
+                     ("Mean IF proxy, facility-statement papers only", S["mean_if_proxy_statement"])]
+    if staff:
+        summary_rows += [("Found only by the staff-list search", S["found_only_by_staff"])]
+    if req:
+        summary_rows += [("Found only by the requester-list search", S["found_only_by_requester"]),
+                         ("With a listed requester as author", S["with_requester"])]
     if S["manual"]:
         summary_rows += [("Included by manual decision", S["manual"])]
     summary_rows += [("Canonical statement", S["canonical"]), ("Variant wording", S["variant"])]
@@ -341,7 +410,7 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     if scope:
         widths.update({scope.column: 22, scope.evidence_column: 50})
     xlsx = outdir / f"{slug}_{year}.xlsx"
-    scols = side_cols(scope)
+    scols = side_cols(scope, cfg)
     with pd.ExcelWriter(xlsx, engine="xlsxwriter") as xw:
         pd.DataFrame(summary_rows, columns=["Metric", "Value"]).to_excel(xw, sheet_name="Summary", index=False)
         df.to_excel(xw, sheet_name="Papers", index=False)
@@ -374,19 +443,17 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
     return S
 
 
-def write_overview(outdir: Path, cfg: dict, overview: list[tuple[int, dict, dict]], statement_only: bool,
-                   run_date: str) -> Path:
+def write_overview(outdir: Path, cfg: dict, overview: list[tuple[int, dict, dict]], run_date: str) -> Path:
     """README.md in the output folder: one row per year."""
     scope = Scope.from_cfg(cfg)
-    mem = not statement_only
     slug = cfg["report_slug"]
-    hdr = (["Year", "Total"] + (["With facility statement", "Core facility member only"] if mem else [])
+    hdr = (["Year", "Total", "With facility statement", "Facility listed as author, no statement"]
            + ["Published", "Preprints", "Other", "Mean IF proxy"]
            + ([f"Left out: {lcfirst(scope.out_label)}"] if scope else []) + ["Needs review", "Unverified", "Report"])
     lines = [f"# {cfg['facility_label']}: overview\n", f"Generated {run_date}.\n",
              "| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
     for y, S, n in overview:
-        cells = ([y, S["total"]] + ([S["with_statement"], S["member_only"]] if mem else [])
+        cells = ([y, S["total"], S["with_statement"], S["member_only"]]
                  + [S["published"], S["preprints"], S["other"], fmt_num(S["mean_if_proxy"], 2)]
                  + ([S["left_out_scope"]] if scope else [])
                  + [n["review"], n["unverified"], f"[{y}]({y}/{slug}_{y}.md)"])
@@ -402,7 +469,8 @@ def write_audit(outdir: Path, records, search_status: list[dict], run_date: str)
     audit = [{"status": r.status, "inclusion_basis": r.basis, "reason": r.reason, "ms_type": r.ms_type,
               "ms_evidence": r.ms_evidence, **r.meta,
               "facility_authors": r.facility_authors, "facility_affiliations": r.facility_affs,
-              "facility_aff_source": r.facility_aff_source, "found_by": r.found_by,
+              "facility_aff_source": r.facility_aff_source, "staff_authors": r.staff_authors,
+              "requester_authors": r.requester_authors, "found_by": r.found_by,
               "fulltext_source": r.fulltext_source, "manual_decision": r.manual,
               "matches": [m.__dict__ for m in r.matches]} for r in records]
     p = outdir / f"candidates_audit_{run_date}.json"

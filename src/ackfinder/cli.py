@@ -32,6 +32,18 @@ def _setup_logging(verbose: bool) -> None:
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
 
+def _attach_run_log(outdir: Path, run_date: str) -> Path:
+    """Also write this run's log to <outdir>/run_log_<date>.txt (a rerun on the same day replaces it)."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / f"run_log_{run_date}.txt"
+    h = logging.FileHandler(path, mode="w", encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S"))
+    root = logging.getLogger()
+    h.setLevel(root.level)
+    root.addHandler(h)
+    return path
+
+
 def _load(args, need_valid: bool = True) -> dict | None:
     path = C.find_config(args.config)
     if not path.is_file():
@@ -106,8 +118,12 @@ def interview() -> dict:
             "out_of_scope_note": _ask("   Short note on who does that work (optional)"),
             "out_of_scope_facilities": _ask("   Names of the facilities that do that work (optional)"),
         }
-    a["include_facility_authors"] = _yes("8. Also list papers where a facility member is only a co-author "
-                                         "(no facility statement)?")
+    a["affiliation_search"] = _yes("8. Also search author affiliations for the facility name? Papers with such an "
+                                   "author are listed even without a facility statement")
+    a["facility_staff"] = _ask("8b. Names of facility staff, separated by ';' (e.g. Jane Doe; Doe, John "
+                               "(0000-0002-1825-0097)). Their papers are listed even without a facility statement")
+    a["requesters"] = _ask("8c. Names of people who request your services, separated by ';'. Their papers count "
+                           "only with a facility statement (long lists are easier to paste into config.yaml later)")
     short = a["short_name"] or C.slugify(a["facility_name"]).split("_")[0]
     a["output_dir"] = _ask("9. Folder for the reports (relative to the config file)",
                            f"reports/{short.lower()}_acknowledgements")
@@ -218,7 +234,12 @@ def cmd_check(args) -> int:
     print("Needs review:      " + ("on (funding-body sentences)" if cfg.get("funding_regex") else "off"))
     print("Scope check:       " + (f"on ({sc.get('column')}: {sc.get('in_scope_label')} vs "
                                     f"{sc.get('out_of_scope_label')})" if sc.get("enabled") else "off"))
-    print("Facility authors:  " + ("listed" if cfg.get("include_facility_authors") else "not listed (default)"))
+    def people(k: str) -> str:
+        ps = C.parse_people(cfg.get(k), k)[0]
+        return f"{len(ps)} people ({sum(bool(x.orcid) for x in ps)} with ORCID)" if ps else "off"
+    aff = cfg.get("affiliation_phrases") or []
+    print("Author searches:   affiliation " + (f"{len(aff)} phrase(s)" if aff else "off")
+          + f"; facility staff {people('facility_staff')}; requesters {people('requesters')}")
     print("Environment:       " + (", ".join(str(p) for p in env_files) if env_files else "no .env file found"))
     for k in C.API_ENV_VARS:
         print(f"  {k:<17}{'set' if os.environ.get(k) else 'not set'}")
@@ -280,7 +301,6 @@ def cmd_run(args) -> int:
     from .pipeline import RunSettings, run   # imported here so `init`/`check` start fast
     over = dict(years=args.years, output_dir=args.outdir, cache_dir=args.cache, pdf_dir=args.pdf_dir,
                 jif_table=args.jif_table, year_basis=args.year_basis,
-                include_facility_authors=True if args.include_facility_authors else None,
                 use_openalex=False if args.no_openalex else None, use_pmc=False if args.no_pmc else None,
                 manual_decisions=args.decisions)
     over = {k: (Path(v).expanduser().resolve() if isinstance(v, (str, Path)) and k not in ("year_basis",) else v)
@@ -290,14 +310,24 @@ def cmd_run(args) -> int:
             print(f"File not found: {over[k]}", file=sys.stderr)
             return 1
     settings = RunSettings.from_config(cfg, **over)
+    log_path = _attach_run_log(settings.output_dir, settings.run_date)
+    log.info("AckFinder %s; config %s; years %s; run log %s", __version__, cfg["_config_path"],
+             " ".join(map(str, settings.years)), log_path)
     if not os.environ.get("OPENALEX_API_KEY") and settings.use_openalex:
         log.info("No OPENALEX_API_KEY: OpenAlex runs keyless (first page of results only, may hit rate limits).")
-    result = run(cfg, settings)
-    print("\nYear  Papers  Published  Preprints  Needs review  Unverified  Report")
+    try:
+        result = run(cfg, settings)
+    except Exception:
+        log.exception("Run failed")
+        raise
+    lines = ["", "Year  Papers  Published  Preprints  Needs review  Unverified  Report"]
     for y, r in result["years"].items():
-        print(f"{y}  {r['total']:>6}  {r['published']:>9}  {r['preprints']:>9}  {r['needs_review']:>12}  "
-              f"{r['unverified']:>10}  {r['report']}")
-    print(f"Overview: {result['overview']}\nAudit trail: {result['audit']}")
+        lines.append(f"{y}  {r['total']:>6}  {r['published']:>9}  {r['preprints']:>9}  {r['needs_review']:>12}  "
+                     f"{r['unverified']:>10}  {r['report']}")
+    lines += [f"Overview: {result['overview']}", f"Audit trail: {result['audit']}", f"Run log: {log_path}"]
+    print("\n".join(lines))
+    with log_path.open("a", encoding="utf-8") as f:       # the results table goes in the log too
+        f.write("\n".join(lines) + "\n")
     return 0
 
 
@@ -343,8 +373,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jif-table", type=Path, help="JCR export with ISSN and JIF columns (overrides jif_table)")
     p.add_argument("--decisions", type=Path, help="Manual decisions file (overrides manual_decisions)")
     p.add_argument("--year-basis", choices=["first", "issue"], help="Overrides year_basis")
-    p.add_argument("--include-facility-authors", action="store_true",
-                   help="Also list papers where a facility member is only an author")
     p.add_argument("--no-openalex", action="store_true", help="Skip OpenAlex")
     p.add_argument("--no-pmc", action="store_true", help="Skip the NCBI PMC search")
     p.add_argument("-v", "--verbose", action="store_true", help="Debug logging")

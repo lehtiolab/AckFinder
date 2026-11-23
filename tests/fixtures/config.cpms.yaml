@@ -1,6 +1,5 @@
-# Worked example: the configuration used by the Clinical Proteomics Mass Spectrometry
-# (CPMS) facility, Karolinska Institutet / SciLifeLab. Copy it to config.yaml to try the
-# tool, or use it as a model for your own facility.
+# Test fixture: a complete facility config (CPMS, Karolinska Institutet / SciLifeLab) that the
+# tests load offline. Not read by `ackfinder`, which uses ./config.yaml (or --config).
 
 # AckFinder configuration
 # ============================================================================
@@ -117,15 +116,27 @@ scope_check:
   in_scope_examples: "trypsin, peptide, TMT, DIA, MaxQuant"
 
 # ----------------------------------------------------------------------------
-# 5. Papers co-authored by facility staff (optional)
+# 5. Author searches (optional)
 # ----------------------------------------------------------------------------
-# Off by default: only papers with a facility sentence are counted. When true, papers
-# where an author lists the facility as affiliation (but no facility sentence) are
-# also listed, in their own Inclusion basis. Most such papers come from research
-# groups that share the facility address, so check them.
-include_facility_authors: false
+# Each list below that has entries adds a search. Every paper found is checked in
+# its full text, like any other candidate.
+#   * facility_staff, affiliation_phrases: a paper with a staff member as author, or
+#     an author whose affiliation names the facility, is listed even without a
+#     facility statement ("Facility listed as author, no statement"). The report's
+#     Statement column shows Yes / No / Not checked for every paper.
+#   * requesters: their papers are searched, but count only with a facility
+#     statement. Ambiguous ones go to "Needs review"; the rest are excluded.
+# Write each person as "Firstname Lastname", or "Lastname, Firstname" for compound
+# surnames. The name is always searched. Add the ORCID if you know it, as
+# "Jane Doe (0000-0002-1825-0097)" or as
+#   - name: Jane Doe
+#     orcid: 0000-0002-1825-0097
+# Names match on surname and first name (or initial when a paper gives only
+# initials). An ORCID also finds papers under other spellings and rules out namesakes.
+facility_staff: []
+requesters: []
 
-# Phrases searched in author affiliations (PubMed, Europe PMC) when the above is true.
+# Phrases searched in author affiliations (PubMed, Europe PMC). Empty = no affiliation search.
 affiliation_phrases:
   - "Clinical Proteomics Mass Spectrometry"
   - "Clinical Proteomics MS"

@@ -28,7 +28,7 @@ same config and the same database contents give the same report.
 
 | You… | Do this | You need |
 |---|---|---|
-| **1. Know Python** | Install (section 2), copy `config.example.yaml` (or the worked example `examples/config.cpms.yaml`) to `config.yaml`, fill it in, run `ackfinder run`. Script it, schedule it or import it (section 9). | Python 3.10+ |
+| **1. Know Python** | Install (section 2), copy `config.example.yaml` to `config.yaml`, fill it in, run `ackfinder run`. Script it, schedule it or import it (section 9). | Python 3.10+ |
 | **2. Can use a terminal, but don't code** | Install (section 2), run `ackfinder init --interactive`, answer the questions in plain words, then run `ackfinder run`. No regular expressions. | Python 3.10+ |
 | **3. Prefer to ask an AI assistant** | Give an AI assistant that can run code a link to this repository, or open the folder in it, and say *"Install AckFinder and run the facility acknowledgement search for me."* It follows [`AGENTS.md`](AGENTS.md): installs the tool, asks you the setup questions in the chat, writes the config, runs the search, explains the results and, if you want, helps you review the uncertain papers. | A coding agent, or a chat app whose code sandbox can reach the internet (see below) |
 | **4. Only have a chatbot that cannot run code** | Ask the same thing. The chatbot follows the fallback skill [`skills/ackfinder-no-code/`](skills/ackfinder-no-code/SKILL.md): it queries the same databases and reads the papers itself. | A chatbot with web access |
@@ -107,8 +107,7 @@ ackfinder check --online            # validates config.yaml, counts hits per sea
 ackfinder run --years 2025 2026     # search, verify, write reports
 ```
 
-The reports are written to the `output_dir` set in the config (default `reports/`). To try the tool before
-setting up your own facility, copy the worked example: `cp examples/config.cpms.yaml config.yaml`.
+The reports are written to the `output_dir` set in the config (default `reports/`).
 
 ## 4. Set up the config for your facility
 
@@ -118,7 +117,6 @@ The config works like a `.env` file:
 |---|---|---|
 | `config.example.yaml` | Commented template with `CHANGE_ME` placeholders. Do not edit it. | Yes (part of the package) |
 | `config.yaml` | Your facility's settings, made from the template. | Your choice (ignored by git by default) |
-| `examples/config.cpms.yaml` | A complete real config (CPMS) to copy from. | Yes |
 
 There are three ways to create `config.yaml`:
 
@@ -157,7 +155,7 @@ these still says `CHANGE_ME`.
 |---|---|---|
 | 3. Funder-only sentences | `funding_regex`, `funding_label`, `context_regex`, `context_label`, `other_facility_regex` | Papers sometimes thank your funder ("… supported by the Infrastructure Board at KI") without naming the facility. Such papers go to *Needs review* and are never counted automatically. |
 | 4. Scope check | `scope_check:` block | Your field overlaps another facility's (e.g. proteomics vs metabolomics). Adds a column such as *MS type*, and excludes or sends to review papers whose credited work is out of scope. |
-| 5. Facility co-authors | `include_facility_authors`, `affiliation_phrases` | You also want papers where facility staff are co-authors but there is no facility statement. |
+| 5. Author searches | `facility_staff`, `requesters`, `affiliation_phrases` | You want to find papers through their authors too. Each list with entries adds a search. A paper with a staff author (or an author whose affiliation names the facility) is listed even without a facility statement; the *Statement* column then says *No* or *Not checked*. Papers by requesters count only with a facility statement. Write people as `Jane Doe` or `Doe, Jane`, optionally with an ORCID: `Jane Doe (0000-0002-1825-0097)`. |
 | 7. Fine-tuning | `canonical_threshold`, `word_expansions`, `other_doi_prefixes` | Rarely needed. |
 
 Every key is explained in a comment in [`config.example.yaml`](config.example.yaml).
@@ -247,7 +245,6 @@ ackfinder run --outdir /some/other/folder  # override for this run only
 | `--pdf-dir DIR` | `pdf_dir` | PDFs you supply for paywalled papers |
 | `--jif-table FILE` | `jif_table` | JCR export for official impact factors |
 | `--decisions FILE` | `manual_decisions` | Your include/exclude decisions (section 7) |
-| `--include-facility-authors` | `include_facility_authors` | Also list papers with a facility co-author but no statement |
 | `--no-openalex`, `--no-pmc` | – | Skip a source |
 | `--cache DIR` | `cache_dir` | Download cache; delete it to force fresh downloads |
 | `-v` | – | Debug logging |
@@ -263,6 +260,7 @@ A first run takes a few minutes, mostly downloading full texts. Reruns are faste
 | `<year>/<slug>_<year>.xlsx` | Same content as spreadsheet sheets |
 | `<year>/<slug>_<year>.csv` | Paper table only |
 | `candidates_audit_<date>.json` | Every query with its hit count, and every candidate with the reason it was kept or rejected |
+| `run_log_<date>.txt` | The run's progress log as shown in the terminal (search hits, each paper checked, warnings, errors) and the final results table |
 
 **Statuses.** Only *Confirmed* papers are counted.
 
@@ -304,8 +302,10 @@ evidence, and writes the decisions you approve to this file.
 ## 8. How it works
 
 1. **Search.** Exact-phrase full-text search for each `search_phrases` entry in Europe PMC and NCBI PMC, and in
-   OpenAlex (`openalex_phrases`). The window starts one year before the first requested year, so papers whose
-   dates differ between databases are not missed.
+   OpenAlex (`openalex_phrases`). If set, also an author-affiliation search (`affiliation_phrases`) and a name
+   search for each person in `facility_staff` and `requesters` (Europe PMC; with an ORCID, also by ORCID in
+   Europe PMC and OpenAlex). The window starts one year before the first requested year, so papers whose dates
+   differ between databases are not missed.
 2. **Merge** hits on DOI, PMCID, PMID, preprint ID and title.
 3. **Metadata** from OpenAlex, Europe PMC and bioRxiv: year, journal, authors, preprint or article, the published
    version of preprints, impact factor.
@@ -321,6 +321,13 @@ evidence, and writes the decisions you approve to this file.
    * **Excluded:** reference-list matches, or sentences about other facilities or out-of-scope work.
 
    If the scope check is on, each paper with a facility sentence is then labelled by term counts in its text.
+
+   The paper's authors are compared with `facility_staff` and `requesters`: same surname and first name (or
+   initial, when only initials are known), accents ignored; an ORCID in Europe PMC's author record overrides the
+   name (same ORCID: match; different ORCID: a namesake). A paper with no facility statement is still listed if
+   the facility is listed as author (a staff author, or an author whose affiliation names the facility). A
+   requester's paper without a statement is excluded, or goes to *Needs review* if a funder sentence makes it
+   ambiguous.
 5. **Report** per year, plus the overview and the audit file.
 
 [`ALGORITHM.md`](ALGORITHM.md) shows the call graph and where to change behaviour in the code.
@@ -361,7 +368,10 @@ Claude Code, copy the folder to `.claude/skills/` in your own project or to `~/.
 ## 10. Known limits
 
 * **Coverage.** Full-text indexes cover open-access papers, PMC author manuscripts, preprints, and the paywalled
-  papers OpenAlex has indexed. A paywalled paper that none of them hold is not found, so counts are a lower bound.
+  papers OpenAlex has indexed. A paywalled paper that none of them hold is found only through the author or
+  affiliation searches, and then needs its PDF to be checked, so counts are a lower bound.
+* **Author names.** Name matching cannot tell two people with the same surname and first name apart. Add ORCIDs
+  where you can, and check the *Facility author(s)* column for papers listed without a statement.
 * **Indexing lag.** Europe PMC and PMC index new papers days to weeks after publication, so counts for the current
   year keep rising.
 * **Names, not paraphrases.** A paper is counted only if it names the facility in a form that `facility_regex`

@@ -3,7 +3,8 @@
 Pipeline stages (run by :func:`ackfinder.pipeline.run`):
 
 1. Candidate search in full-text indexes: Europe PMC, NCBI PMC, OpenAlex
-   (``fulltext.search``); author-affiliation search only when facility authors are included.
+   (``fulltext.search``); author-affiliation search when `affiliation_phrases` is set; author-name
+   (and ORCID) search for the people in `facility_staff` and `requesters`.
 2. Merge candidates across sources (DOI / PMCID / PMID / preprint id / title).
 3. Metadata: title, DOI, first and last author, journal, article vs preprint, published
    version of preprints, and an impact-factor value (Clarivate JIF from a user-supplied
@@ -34,6 +35,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 from lxml import etree
+
+from .config import Person, given_key, given_matches, name_key, norm_orcid, parse_people, split_name
 
 log = logging.getLogger("ackfinder")
 
@@ -76,9 +79,13 @@ CATEGORY_ORDER = ["Acknowledgements", "Funding", "Methods", "Main text", "Declar
 
 # Why a paper is in the report ("Inclusion basis" column).
 BASIS_STATEMENT = "Facility statement"
-BASIS_BOTH = "Facility statement + core facility member listed as author"
-BASIS_MEMBER = "Core facility member listed as author"
+BASIS_BOTH = "Facility statement + facility listed as author"
+BASIS_MEMBER = "Facility listed as author, no statement"
 BASIS_MANUAL = "Manual decision"
+
+# Author lists in the config -> the label used in search sources ("EuropePMC (staff)") and reports.
+AUTHOR_LISTS = {"facility_staff": "staff", "requesters": "requester"}
+AUTHOR_SEARCH_SOURCES = {f"{src} ({label})" for src in ("EuropePMC", "OpenAlex") for label in AUTHOR_LISTS.values()}
 
 # A sentence that credits someone uses one of these words; an affiliation line does not.
 STATEMENT_VERB = re.compile(
@@ -319,6 +326,8 @@ class Record:
     facility_authors: list[str] = field(default_factory=list)     # authors with a facility affiliation
     facility_affs: list[str] = field(default_factory=list)        # the affiliation strings themselves
     facility_aff_source: str = ""                                 # where the affiliation was seen
+    staff_authors: list[str] = field(default_factory=list)        # facility_staff entries among the authors
+    requester_authors: list[str] = field(default_factory=list)    # requesters entries among the authors
     basis: str = ""                                               # inclusion basis (BASIS_*)
     ms_type: str = ""                                             # scope-check call (Scope labels)
     ms_evidence: str = ""                                         # what the scope call was based on
@@ -359,6 +368,13 @@ class Record:
     def found_by(self) -> list[str]:
         return sorted({f"{it.source}: {it.phrase}" for it in self.items})
 
+    @property
+    def author_search_only(self) -> list[str]:
+        """The author lists ('staff', 'requester') that found this paper, if only author-name searches found it."""
+        if not self.items or any(it.source not in AUTHOR_SEARCH_SOURCES for it in self.items):
+            return []
+        return sorted({it.source.split("(")[1].rstrip(")") for it in self.items})
+
 
 # ------------------------------------------------------------- candidate search
 class Searcher:
@@ -370,6 +386,7 @@ class Searcher:
         self.oa_down = ""                   # why OpenAlex refused us for good; then skip all OpenAlex calls
         self._oa_meta_noted = False
         self._last_note = ""
+        self.people = {k: parse_people(cfg.get(k), k)[0] for k in AUTHOR_LISTS}
 
     def _note(self, source: str, where: str, phrase: str, hits: int | None, note: str = "") -> None:
         self.status.append(dict(source=source, field=where, phrase=phrase, hits=hits, note=note))
@@ -419,6 +436,19 @@ class Searcher:
             res = self.epmc_query(f"{q} AND {date}", fallback=True)
             self._note("Europe PMC", where, ph, len(res), self._last_note)
             items += [self._item_from_epmc(e, source, ph) for e in res]
+        return items
+
+    def epmc_author_search(self, y0: int, y1: int) -> list[Item]:
+        """One Europe PMC query per person in `facility_staff` / `requesters`: the name
+        (AUTH:"Surname Firstname"), OR the ORCID when one is given."""
+        items = []
+        date = f"(FIRST_PDATE:[{y0 - 1}-01-01 TO {y1}-12-31])"
+        for key, label in AUTHOR_LISTS.items():
+            for p in self.people[key]:
+                terms = [f'AUTH:"{p.query_name}"'] + ([f'AUTHORID:"{p.orcid}"'] if p.orcid else [])
+                res = self.epmc_query(f"({' OR '.join(terms)}) AND {date}", fallback=True)
+                self._note("Europe PMC", f"author ({label})", p.name, len(res), self._last_note)
+                items += [self._item_from_epmc(e, f"EuropePMC ({label})", p.name) for e in res]
         return items
 
     @staticmethod
@@ -563,58 +593,78 @@ class Searcher:
         A Retry-After of hours means the daily budget is used up: no waiting, and no further
         OpenAlex calls at all in this run (searches or metadata lookups).
         """
-        queries = [("fulltext.search", ph, "OpenAlex", "full text") for ph in self.cfg.get("openalex_phrases", [])]
+        queries = [(f'fulltext.search:"{ph}"', ph, "OpenAlex", "full text")
+                   for ph in self.cfg.get("openalex_phrases", [])]
         if affiliations:
-            queries += [("raw_affiliation_strings.search", ph, "OpenAlex (affiliation)", "affiliation")
+            queries += [(f'raw_affiliation_strings.search:"{ph}"', ph, "OpenAlex (affiliation)", "affiliation")
                         for ph in self.cfg.get("openalex_affiliation_phrases",
                                                self.cfg.get("affiliation_phrases", [])[:1])]
         items = []
         for flt, ph, source, where in queries:
-            if self.oa_search_down or self.oa_down:
-                self._note("OpenAlex", where, ph, None, "skipped: OpenAlex search unavailable in this run")
-                continue
-            cursor, n, note, total = "*", 0, "", None
-            while cursor:
-                r = self.http.get(f"{OPENALEX}/works", params=self._oa_params({
-                    "filter": f'{flt}:"{ph}",publication_year:{y0 - 1}-{y1}',
-                    "per-page": OPENALEX_PER_PAGE, "cursor": cursor}), fallback=True, tries=4, max_wait=75)
-                if r is None or r.status_code != 200:
-                    code = getattr(r, "status_code", "no response")
-                    budget = self._oa_budget_gone(r)
-                    note = f"failed (HTTP {code}{', daily budget used up' if budget else ''})" + (
-                        "; partial result" if n else "")
-                    log.warning("OpenAlex search failed (%s): %s", code, getattr(r, "text", "")[:160])
-                    if code == 429:
-                        self.oa_search_down = True
-                    if budget:
-                        self._oa_stop("HTTP 429, daily budget used up")
-                    break
-                if getattr(r, "stale", None):
-                    note = f"live query failed; stored result from {r.stale}"
-                j = r.json()
-                if total is None:
-                    total = (j.get("meta") or {}).get("count")
-                for w in j.get("results", []):
-                    n += 1
-                    t = w.get("type")
-                    doi = norm_doi(w.get("doi"))
-                    kind = "preprint" if (t == "preprint" or doi_prefix(doi) in PREPRINT_PREFIXES) else (
-                        "article" if t in ("article", "review", "letter") else "other")
-                    ids = w.get("ids") or {}
-                    pmcid = (ids.get("pmcid") or "").rstrip("/").rsplit("/", 1)[-1].upper() or None
-                    if pmcid and not pmcid.startswith("PMC"):
-                        pmcid = "PMC" + pmcid
-                    items.append(Item(source=source, phrase=ph, doi=doi,
-                                      pmid=(ids.get("pmid") or "").rstrip("/").rsplit("/", 1)[-1] or None,
-                                      pmcid=pmcid, title=w.get("title"), kind_hint=kind, openalex=w))
-                cursor = j.get("meta", {}).get("next_cursor")
-            if total and n < total:
-                cut = f"truncated: {n} of {total} results" + ("" if self.oa_key else
-                                                              " (set OPENALEX_API_KEY to page further)")
-                log.warning("OpenAlex %s \"%s\": %s", where, ph, cut)
-                note = f"{note}; {cut}" if note else cut
-            self._note("OpenAlex", where, ph, None if note.startswith("failed") and not n else n, note)
-        # attach Europe PMC records by DOI so PMCIDs / preprint IDs are known
+            items += self._openalex_query(f"{flt},publication_year:{y0 - 1}-{y1}", ph, source, where)
+        return self._attach_epmc(items)
+
+    def openalex_author_search(self, y0: int, y1: int) -> list[Item]:
+        """OpenAlex works by ORCID, for the people in `facility_staff` / `requesters` that have one
+        (up to 50 ORCIDs per query). Names alone are searched in Europe PMC only."""
+        items = []
+        for key, label in AUTHOR_LISTS.items():
+            orcids = [p.orcid for p in self.people[key] if p.orcid]
+            for batch in chunks(orcids, 50):
+                items += self._openalex_query(f"author.orcid:{'|'.join(batch)},publication_year:{y0 - 1}-{y1}",
+                                              f"{len(batch)} ORCID(s)", f"OpenAlex ({label})", f"author ({label})")
+        return self._attach_epmc(items)
+
+    def _openalex_query(self, flt: str, ph: str, source: str, where: str) -> list[Item]:
+        """One OpenAlex works query (filter `flt`), paged with a cursor; Items tagged with `source`."""
+        if self.oa_search_down or self.oa_down:
+            self._note("OpenAlex", where, ph, None, "skipped: OpenAlex search unavailable in this run")
+            return []
+        items = []
+        cursor, n, note, total = "*", 0, "", None
+        while cursor:
+            r = self.http.get(f"{OPENALEX}/works", params=self._oa_params({
+                "filter": flt, "per-page": OPENALEX_PER_PAGE, "cursor": cursor}), fallback=True, tries=4, max_wait=75)
+            if r is None or r.status_code != 200:
+                code = getattr(r, "status_code", "no response")
+                budget = self._oa_budget_gone(r)
+                note = f"failed (HTTP {code}{', daily budget used up' if budget else ''})" + (
+                    "; partial result" if n else "")
+                log.warning("OpenAlex search failed (%s): %s", code, getattr(r, "text", "")[:160])
+                if code == 429:
+                    self.oa_search_down = True
+                if budget:
+                    self._oa_stop("HTTP 429, daily budget used up")
+                break
+            if getattr(r, "stale", None):
+                note = f"live query failed; stored result from {r.stale}"
+            j = r.json()
+            if total is None:
+                total = (j.get("meta") or {}).get("count")
+            for w in j.get("results", []):
+                n += 1
+                t = w.get("type")
+                doi = norm_doi(w.get("doi"))
+                kind = "preprint" if (t == "preprint" or doi_prefix(doi) in PREPRINT_PREFIXES) else (
+                    "article" if t in ("article", "review", "letter") else "other")
+                ids = w.get("ids") or {}
+                pmcid = (ids.get("pmcid") or "").rstrip("/").rsplit("/", 1)[-1].upper() or None
+                if pmcid and not pmcid.startswith("PMC"):
+                    pmcid = "PMC" + pmcid
+                items.append(Item(source=source, phrase=ph, doi=doi,
+                                  pmid=(ids.get("pmid") or "").rstrip("/").rsplit("/", 1)[-1] or None,
+                                  pmcid=pmcid, title=w.get("title"), kind_hint=kind, openalex=w))
+            cursor = j.get("meta", {}).get("next_cursor")
+        if total and n < total:
+            cut = f"truncated: {n} of {total} results" + ("" if self.oa_key else
+                                                          " (set OPENALEX_API_KEY to page further)")
+            log.warning("OpenAlex %s \"%s\": %s", where, ph, cut)
+            note = f"{note}; {cut}" if note else cut
+        self._note("OpenAlex", where, ph, None if note.startswith("failed") and not n else n, note)
+        return items
+
+    def _attach_epmc(self, items: list[Item]) -> list[Item]:
+        """Attach Europe PMC records by DOI so PMCIDs / preprint IDs (and author ORCIDs) are known."""
         dois = [it.doi for it in items if it.doi]
         epmc = self.epmc_lookup("DOI", dois) if dois else {}
         for it in items:
@@ -913,6 +963,71 @@ def pdf_blocks(pdf_bytes: bytes) -> list[tuple[str, str, str]]:
     return [(re.sub(r"(\w)- (\w)", r"\1\2", t), s, c) for t, s, c in out]
 
 
+# ------------------------------------------------------------- author lists
+@dataclass(frozen=True)
+class Author:
+    """One author of a paper, reduced to what `match_people` compares."""
+    surname: str            # name_key of the surname
+    given: str              # given_key: first given name, or its initial ('' if unknown)
+    orcid: str | None = None
+
+
+def record_authors(rec: "Record") -> list[Author]:
+    """Authors of a paper from Europe PMC (with ORCIDs), OpenAlex and bioRxiv / NCBI metadata.
+
+    ORCIDs are taken from Europe PMC author records only: OpenAlex assigns ORCIDs to its own author
+    clusters, and those links are sometimes wrong, so an OpenAlex ORCID never decides a match.
+    """
+    out: list[Author] = []
+
+    def add(surname: str, given: str, orcid: str | None = None) -> None:
+        a = Author(name_key(surname), given_key(given), orcid)
+        if a.surname and a not in out:
+            out.append(a)
+
+    for e in rec.epmc:
+        for au in ((e.get("authorList") or {}).get("author") or []):
+            aid = au.get("authorId") or {}
+            orcid = norm_orcid(aid.get("value")) if str(aid.get("type", "")).upper() == "ORCID" else None
+            if au.get("lastName"):
+                add(au["lastName"], au.get("firstName") or au.get("initials") or "", orcid)
+            elif au.get("fullName"):
+                add(*split_name(au["fullName"]), orcid)
+    for au in ((rec.openalex or {}).get("authorships") or []):
+        for nm in {au.get("raw_author_name"), (au.get("author") or {}).get("display_name")} - {None, ""}:
+            add(*split_name(nm))
+    if rec.biorxiv and rec.biorxiv.get("authors"):
+        for nm in rec.biorxiv["authors"].split(";"):
+            add(*split_name(nm))
+    for au in ((rec.pmc_summary or {}).get("authors") or []):
+        if au.get("name"):
+            add(*split_name(au["name"]))
+    return out
+
+
+def match_people(authors: list[Author], people: list[Person]) -> list[str]:
+    """Names (as in the config) of the listed people who are authors.
+
+    A person matches by name: same surname (accents ignored) and same first name, or same initial when
+    either side gives only initials (`given_matches`). An ORCID refines
+    this: the person's ORCID on any author is a match whatever the spelling, and an author with the
+    same name but a different ORCID is a namesake.
+    """
+    orcids = {a.orcid for a in authors if a.orcid}
+    out = []
+    for p in people:
+        if p.orcid and p.orcid in orcids:
+            out.append(p.name)
+            continue
+        same_name = [a for a in authors if a.surname == p.key[0] and given_matches(a.given, p.key[1])]
+        if not same_name:
+            continue
+        if p.orcid and all(a.orcid and a.orcid != p.orcid for a in same_name):
+            continue                       # every author with this name has another ORCID: a namesake
+        out.append(p.name)
+    return out
+
+
 class Verifier:
     """Retrieves full texts and classifies sentences. `http` and `searcher` may be None when
     only `classify` / `score` are used (e.g. `ackfinder classify`)."""
@@ -925,6 +1040,7 @@ class Verifier:
         self.other = compile_rx(cfg.get("other_facility_regex"))    # optional
         self.scope = Scope.from_cfg(cfg)                            # optional
         self.expansions = cfg.get("word_expansions") or {}
+        self.people = {k: parse_people(cfg.get(k), k)[0] for k in AUTHOR_LISTS}
         canon = " ".join(cfg["canonical_statement"].split())
         self.canon = canon
         self.canon_words = set(norm_words(canon, self.expansions))
@@ -1124,18 +1240,38 @@ class Verifier:
         return None
 
     def verify(self, rec: Record) -> None:
+        """Set rec.status / basis / reason.
+
+        Counted ("Confirmed"): a facility statement, or the facility listed as author (an author's
+        affiliation names the facility, or an author is on `facility_staff`), with or without a statement.
+        A listed requester never adds a paper by itself: without a statement the paper is excluded.
+        """
         blocks, src = self.fetch(rec)
         rec.blocks = blocks
         rec.fulltext_source = src
         rec.matches = self.classify(blocks) if blocks else []
         rec.facility_authors, rec.facility_affs, rec.facility_aff_source = self.facility_affiliations(rec)
+        authors = record_authors(rec)
+        rec.staff_authors = match_people(authors, self.people["facility_staff"])
+        rec.requester_authors = match_people(authors, self.people["requesters"])
+        if rec.staff_authors:
+            rec.facility_authors = list(dict.fromkeys(rec.facility_authors + rec.staff_authors))
+            rec.facility_aff_source = "; ".join(x for x in (rec.facility_aff_source, "facility staff list") if x)
         classes = {m.klass for m in rec.matches}
-        has_member = bool(rec.facility_affs) or "Affiliation only" in classes
-        if rec.facility_affs and "Affiliation only" not in classes:
-            # seen only in database metadata: record it so the report can quote it
-            rec.matches.append(Match(sentence=rec.facility_affs[0][:1200],
-                                     section=f"Author affiliations ({rec.facility_aff_source})",
-                                     category="Affiliation", klass="Affiliation only", score=0.0))
+        has_member = bool(rec.facility_affs or rec.staff_authors) or "Affiliation only" in classes
+        if "Affiliation only" not in classes:
+            # seen only in database metadata or the staff list: record it so the report can quote it
+            if rec.facility_affs:
+                rec.matches.append(Match(sentence=rec.facility_affs[0][:1200],
+                                         section=f"Author affiliations ({rec.facility_aff_source})",
+                                         category="Affiliation", klass="Affiliation only", score=0.0))
+            elif rec.staff_authors:
+                rec.matches.append(Match(sentence="Author on the facility staff list: " + ", ".join(rec.staff_authors),
+                                         section="Author list (facility_staff)", category="Affiliation",
+                                         klass="Affiliation only", score=0.0))
+        requester = (f"Listed requester(s) among the authors: {', '.join(rec.requester_authors)}. "
+                     if rec.requester_authors else "")
+        by_name_only = bool(rec.author_search_only)
         if classes & {"Canonical statement", "Variant wording"}:
             rec.status = "Confirmed"
             rec.basis = BASIS_BOTH if has_member else BASIS_STATEMENT
@@ -1143,22 +1279,30 @@ class Verifier:
             if verdict:                                   # small-molecule MS: not this facility's work
                 rec.status, rec.reason = verdict
         elif has_member:
-            rec.status = "Affiliation only"
+            rec.status = "Confirmed"
             rec.basis = BASIS_MEMBER
-            rec.reason = ("No facility statement in the full text; included because a core facility member is "
-                          "listed as author." if blocks else
-                          "Full text not retrievable, so acknowledgements were not checked; included because a "
-                          "core facility member is listed as author (database metadata).")
+            rec.reason = ("No facility statement in the full text; listed because the facility is listed as author."
+                          if blocks else
+                          "Full text not retrievable, so the acknowledgements were not checked; listed because the "
+                          "facility is listed as author (database metadata).")
+        elif by_name_only and not rec.requester_authors:
+            rec.status = "Excluded"
+            rec.reason = ("Found only by an author-name search, but no listed person is an author "
+                          "(a namesake, or a different ORCID)" + ("." if blocks else "; full text not retrievable."))
         elif not blocks:
             rec.status = "Unverified"
-            rec.reason = "Full text not retrievable (paywalled or not indexed); matched only in a search index."
+            rec.reason = requester + ("Full text not retrievable (paywalled or not indexed); "
+                                      + ("matched only in a search index." if not requester else
+                                         "add the PDF to check for a facility statement."))
         elif "Review" in classes:
             rec.status = "Review"
-            rec.reason = (f"Funding-body sentence mentions {self.cfg.get('context_label') or 'the field'} "
-                          "but does not name the facility.")
+            rec.reason = requester + (f"Funding-body sentence mentions {self.cfg.get('context_label') or 'the field'} "
+                                      "but does not name the facility.")
         else:
             rec.status = "Excluded"
-            if any(m.category == "References" for m in rec.matches) and not any(
+            if requester:
+                rec.reason = requester + "No facility statement in the full text (requesters count only with one)."
+            elif any(m.category == "References" for m in rec.matches) and not any(
                     m.category != "References" for m in rec.matches):
                 rec.reason = "Phrase occurs only in the reference list."
             elif any(self._out_of_scope(m.sentence) for m in rec.matches if m.klass == "Excluded"):
@@ -1354,8 +1498,11 @@ def row_for(rec: Record) -> dict:
     manual_include = bool(rec.manual and rec.manual["decision"] == "include" and rec.basis == BASIS_MANUAL)
     return {**rec.meta,
             "inclusion_basis": rec.basis,
+            "has_statement": "Yes" if counted else ("No" if rec.fulltext_source else "Not checked"),
             "ms_type": rec.ms_type, "ms_evidence": rec.ms_evidence,
             "facility_authors": "; ".join(rec.facility_authors),
+            "requester_authors": "; ".join(rec.requester_authors),
+            "author_search_only": "; ".join(rec.author_search_only),
             "facility_affiliation": rec.facility_affs[0] if rec.facility_affs else (aff.sentence if aff else ""),
             "facility_aff_source": rec.facility_aff_source or ("full text" if aff else ""),
             "statement_type": BASIS_MANUAL if manual_include else (stmt.klass if stmt else ""),

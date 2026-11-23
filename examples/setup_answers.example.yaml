@@ -29,7 +29,9 @@ scope:
   out_of_scope_note: metabolomics, lipidomics; run by another facility
   out_of_scope_facilities: [Metabolomics Core]
 
-include_facility_authors: false
+affiliation_search: false                         # also search author affiliations for the facility name
+facility_staff: []                                # "Jane Doe" or "Jane Doe (0000-0002-1825-0097)"
+requesters: []                                    # count only with a facility statement
 
 # Folders (relative to config.yaml)
 output_dir: reports/epf_acknowledgements

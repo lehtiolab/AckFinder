@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def cpms_cfg():
     """The CPMS worked example (offline: no network needed to load or classify)."""
-    return C.load_config(ROOT / "examples" / "config.cpms.yaml")
+    return C.load_config(ROOT / "tests" / "fixtures" / "config.cpms.yaml")
 
 
 @pytest.fixture

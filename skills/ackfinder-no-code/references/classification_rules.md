@@ -65,7 +65,7 @@ Check in this order; the first rule that applies wins.
 | Condition (first that applies) | Status | Counted? |
 |---|---|---|
 | At least one Canonical statement or Variant wording | **Confirmed** (then the scope check, below) | yes |
-| A facility member is an author (only if `include_facility_authors` is true) | Affiliation only | only with that setting |
+| The facility is listed as author: an author's affiliation names the facility, or an author is in `facility_staff` (same surname and first name) | Confirmed, basis "Facility listed as author, no statement" | yes, marked as without a statement |
 | No full text could be retrieved | Unverified | no |
 | At least one Review sentence | Needs review | no |
 | Otherwise | Excluded, with a reason: "Phrase occurs only in the reference list", "Funding-body sentence concerns another facility", or "Phrase not found in the retrieved full text" | no |
