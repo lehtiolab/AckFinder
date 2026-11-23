@@ -283,6 +283,7 @@ class Person:
     surname: str              # as written, e.g. 'van Beethoven'
     given: str
     orcid: str | None = None
+    affiliations: tuple[str, ...] = ()   # e.g. ('Karolinska Institutet', 'SciLifeLab')
 
     @property
     def key(self) -> tuple[str, str]:
@@ -304,10 +305,26 @@ def norm_orcid(v: Any) -> str | None:
     return m.group(1).upper() if m else None
 
 
+PERSON_KEYS = ("name", "orcid", "affiliations", "affiliation")
+
+
 def parse_person(entry: Any) -> Person:
-    """'Jane Doe', 'Doe, Jane', 'Jane Doe (0000-0002-1825-0097)' or {name: ..., orcid: ...}. Raises ValueError."""
+    """'Jane Doe', 'Doe, Jane', 'Jane Doe (0000-0002-1825-0097)' or
+    {name: ..., orcid: ..., affiliations: [...]}. Raises ValueError."""
+    affs: list[str] = []
     if isinstance(entry, dict):
+        bad = [str(k) for k in entry if k not in PERSON_KEYS]
+        if bad:
+            raise ValueError(f"unknown key {bad[0]!r} (use name, orcid, affiliations)")
         name, orcid_text = str(entry.get("name") or "").strip(), str(entry.get("orcid") or "").strip()
+        raw = entry.get("affiliations", entry.get("affiliation"))
+        if isinstance(raw, str):
+            raw = raw.split(";")
+        if raw is not None and not isinstance(raw, list):
+            raise ValueError("`affiliations` must be a list, e.g. [Karolinska Institutet, SciLifeLab]")
+        affs = [" ".join(str(a).split()) for a in raw or [] if str(a or "").strip()]
+        if any(not aff_key(a).strip() for a in affs):
+            raise ValueError(f"affiliation without letters or digits in {affs}")
     else:
         text = str(entry or "")
         m = ORCID_RX.search(text)
@@ -322,7 +339,7 @@ def parse_person(entry: Any) -> Person:
     surname, given = split_name(name)
     if not name_key(surname) or not name_key(given):
         raise ValueError(f"{name!r}: write first and last name, e.g. 'Jane Doe' or 'Doe, Jane'")
-    return Person(name=name, surname=surname, given=given, orcid=orcid)
+    return Person(name=name, surname=surname, given=given, orcid=orcid, affiliations=tuple(affs))
 
 
 def parse_people(entries: Any, key: str = "people") -> tuple[list[Person], list[str]]:
@@ -338,10 +355,29 @@ def parse_people(entries: Any, key: str = "people") -> tuple[list[Person], list[
     return people, errors
 
 
-def _person_text(entry: Any) -> str:
-    """An answers-file entry as one config line: 'Jane Doe (0000-0002-1825-0097)'."""
+def aff_key(s: str) -> str:
+    """Affiliation text for matching: folded, punctuation as spaces, padded ('SciLifeLab,' -> ' scilifelab ')."""
+    return " " + " ".join(re.sub(r"[^a-z0-9]+", " ", fold(s)).split()) + " "
+
+
+def affiliation_matches(text: str, phrases: Any) -> str | None:
+    """The first of `phrases` found in the affiliation `text`, starting at a word (case, accents and
+    punctuation ignored): 'Karolinska Institutet' is found in 'Dept. of Oncology, Karolinska Institutet,
+    Solna'. None if none is."""
+    t = aff_key(text)
+    return next((p for p in phrases if aff_key(p).rstrip() in t), None)
+
+
+def _person_entry(entry: Any) -> str | dict:
+    """An answers-file entry for the config: 'Jane Doe (0000-0002-1825-0097)', or a mapping when it
+    gives affiliations ({name: Jane Doe, affiliations: [...]})."""
     if isinstance(entry, dict):
         name, orcid = str(entry.get("name") or "").strip(), str(entry.get("orcid") or "").strip()
+        affs = entry.get("affiliations", entry.get("affiliation"))
+        if affs:
+            return {"name": name, **({"orcid": orcid} if orcid else {}),
+                    "affiliations": [a.strip() for a in (affs.split(";") if isinstance(affs, str) else affs)
+                                     if str(a).strip()]}
         return f"{name} ({orcid})" if orcid else name
     return " ".join(str(entry).split())
 
@@ -445,7 +481,7 @@ def build_config(answers: dict) -> dict:
     cfg["affiliation_phrases"] = names if aff else []
     cfg["openalex_affiliation_phrases"] = names[:1] if aff else []
     for k in PEOPLE_KEYS:
-        cfg[k] = [_person_text(x) for x in (_list(answers.get(k)) if not isinstance(answers.get(k), list)
+        cfg[k] = [_person_entry(x) for x in (_list(answers.get(k)) if not isinstance(answers.get(k), list)
                                             else answers[k]) if x]
     cfg["output_dir"] = answers.get("output_dir") or f"reports/{cfg['report_slug']}"
     cfg["cache_dir"] = answers.get("cache_dir") or "cache"
@@ -474,6 +510,8 @@ def _scalar(key: str, v: Any, indent: str) -> str:
         return yaml.safe_dump(v).splitlines()[0]
     if isinstance(v, (dt.date,)):
         return v.isoformat()
+    if isinstance(v, (dict, list)):                   # e.g. a person with affiliations: JSON is YAML flow style
+        return json.dumps(v, ensure_ascii=False)
     s = str(v)
     if key.endswith(_REGEX_SUFFIX):
         return "'" + s.replace("'", "''") + "'"

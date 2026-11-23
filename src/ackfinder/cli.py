@@ -236,7 +236,8 @@ def cmd_check(args) -> int:
                                     f"{sc.get('out_of_scope_label')})" if sc.get("enabled") else "off"))
     def people(k: str) -> str:
         ps = C.parse_people(cfg.get(k), k)[0]
-        return f"{len(ps)} people ({sum(bool(x.orcid) for x in ps)} with ORCID)" if ps else "off"
+        return (f"{len(ps)} people ({sum(bool(x.orcid) for x in ps)} with ORCID, "
+                f"{sum(bool(x.affiliations) for x in ps)} with affiliations)") if ps else "off"
     aff = cfg.get("affiliation_phrases") or []
     print("Author searches:   affiliation " + (f"{len(aff)} phrase(s)" if aff else "off")
           + f"; facility staff {people('facility_staff')}; requesters {people('requesters')}")

@@ -328,8 +328,11 @@ def write_reports(year: int, rows: list[dict], side: dict[str, list[dict]], cfg:
             + " and ".join(x for x, on in (("facility staff list", staff), ("requester list", req)) if on)
             + " was searched in Europe PMC by name (surname and first name), and also by ORCID (Europe PMC "
             "and OpenAlex) when one is given. A paper matches a person when an author has the same surname and first "
-            "name, or first initial when only initials are known (accents ignored); an ORCID in Europe PMC's author record refines this (same ORCID: a match "
-            "whatever the spelling; different ORCID: a namesake). "
+            "name, or first initial when only initials are known (accents ignored). An ORCID, then the person's "
+            "affiliations, refine this: the same ORCID in Europe PMC's author record is a match whatever the spelling, "
+            "and a different ORCID marks a namesake; an author with the same name and one of the person's "
+            "affiliations is a match, and one whose affiliations are known but include none of them is a namesake. "
+            "With nothing to compare, the name decides. The evidence column says how each staff member was matched. "
             + ("Papers by requesters count only with a facility statement. " if req else "")
             + "Papers found only by a name search where no listed person is an author are excluded as namesakes.")
     if scope:

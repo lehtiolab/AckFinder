@@ -36,7 +36,8 @@ import pandas as pd
 import requests
 from lxml import etree
 
-from .config import Person, given_key, given_matches, name_key, norm_orcid, parse_people, split_name
+from .config import (Person, affiliation_matches, given_key, given_matches, name_key, norm_orcid, parse_people,
+                     split_name)
 
 log = logging.getLogger("ackfinder")
 
@@ -970,18 +971,22 @@ class Author:
     surname: str            # name_key of the surname
     given: str              # given_key: first given name, or its initial ('' if unknown)
     orcid: str | None = None
+    affs: tuple[str, ...] = ()   # this author's affiliations on this paper ('' if unknown)
 
 
 def record_authors(rec: "Record") -> list[Author]:
-    """Authors of a paper from Europe PMC (with ORCIDs), OpenAlex and bioRxiv / NCBI metadata.
+    """Authors of a paper from Europe PMC (with ORCIDs and affiliations), OpenAlex (with affiliations) and
+    bioRxiv / NCBI metadata (names only).
 
     ORCIDs are taken from Europe PMC author records only: OpenAlex assigns ORCIDs to its own author
-    clusters, and those links are sometimes wrong, so an OpenAlex ORCID never decides a match.
+    clusters, and those links are sometimes wrong, so an OpenAlex ORCID never decides a match. OpenAlex
+    affiliations are those printed on this paper (raw affiliation strings), so they are used.
     """
     out: list[Author] = []
 
-    def add(surname: str, given: str, orcid: str | None = None) -> None:
-        a = Author(name_key(surname), given_key(given), orcid)
+    def add(surname: str, given: str, orcid: str | None = None, affs: Any = ()) -> None:
+        affs = tuple(dict.fromkeys(" ".join(str(t).split()) for t in affs if t and str(t).strip()))
+        a = Author(name_key(surname), given_key(given), orcid, affs)
         if a.surname and a not in out:
             out.append(a)
 
@@ -989,13 +994,18 @@ def record_authors(rec: "Record") -> list[Author]:
         for au in ((e.get("authorList") or {}).get("author") or []):
             aid = au.get("authorId") or {}
             orcid = norm_orcid(aid.get("value")) if str(aid.get("type", "")).upper() == "ORCID" else None
+            affs = [x.get("affiliation") for x in
+                    ((au.get("authorAffiliationDetailsList") or {}).get("authorAffiliation") or [])]
+            affs.append(au.get("affiliation"))
             if au.get("lastName"):
-                add(au["lastName"], au.get("firstName") or au.get("initials") or "", orcid)
+                add(au["lastName"], au.get("firstName") or au.get("initials") or "", orcid, affs)
             elif au.get("fullName"):
-                add(*split_name(au["fullName"]), orcid)
+                add(*split_name(au["fullName"]), orcid, affs)
     for au in ((rec.openalex or {}).get("authorships") or []):
+        affs = list(au.get("raw_affiliation_strings") or []) + [i.get("display_name") for i in
+                                                               (au.get("institutions") or []) if i]
         for nm in {au.get("raw_author_name"), (au.get("author") or {}).get("display_name")} - {None, ""}:
-            add(*split_name(nm))
+            add(*split_name(nm), None, affs)
     if rec.biorxiv and rec.biorxiv.get("authors"):
         for nm in rec.biorxiv["authors"].split(";"):
             add(*split_name(nm))
@@ -1005,27 +1015,43 @@ def record_authors(rec: "Record") -> list[Author]:
     return out
 
 
-def match_people(authors: list[Author], people: list[Person]) -> list[str]:
-    """Names (as in the config) of the listed people who are authors.
+def match_person(authors: list[Author], p: Person) -> tuple[bool, str]:
+    """Is `p` an author of the paper? Returns (match, how it was decided); how is '' when no author has
+    the name.
 
-    A person matches by name: same surname (accents ignored) and same first name, or same initial when
-    either side gives only initials (`given_matches`). An ORCID refines
-    this: the person's ORCID on any author is a match whatever the spelling, and an author with the
-    same name but a different ORCID is a namesake.
+    The name is the base: same surname (accents ignored) and same first name, or same initial when
+    either side gives only initials (`given_matches`). An ORCID, then affiliations, refine it, in that
+    order:
+      1. the person's ORCID on any author: a match, whatever the spelling;
+         an author with the same name but another ORCID: a namesake;
+      2. an author with the same name and one of the person's affiliations: a match;
+         authors with the same name whose affiliations are known but include none of them: a namesake;
+      3. otherwise (nothing known to compare): a match by name.
+    The same author usually appears once per source (Europe PMC, OpenAlex, bioRxiv), often without an
+    ORCID or affiliation in some of them; a source that knows less never overrules one that knows more.
     """
-    orcids = {a.orcid for a in authors if a.orcid}
-    out = []
-    for p in people:
-        if p.orcid and p.orcid in orcids:
-            out.append(p.name)
-            continue
-        same_name = [a for a in authors if a.surname == p.key[0] and given_matches(a.given, p.key[1])]
-        if not same_name:
-            continue
-        if p.orcid and all(a.orcid and a.orcid != p.orcid for a in same_name):
-            continue                       # every author with this name has another ORCID: a namesake
-        out.append(p.name)
-    return out
+    if p.orcid and any(a.orcid == p.orcid for a in authors):
+        return True, "ORCID"
+    same = [a for a in authors if a.surname == p.key[0] and given_matches(a.given, p.key[1])]
+    if not same:
+        return False, ""
+    if p.orcid and any(a.orcid and a.orcid != p.orcid for a in same):
+        return False, "same name, different ORCID"
+    if p.affiliations:
+        for a in same:
+            for t in a.affs:
+                hit = affiliation_matches(t, p.affiliations)
+                if hit:
+                    return True, f"name + affiliation {hit}"
+        known = next((a.affs[0] for a in same if a.affs), None)
+        if known:
+            return False, f"same name, affiliation \"{known[:100] + ('…' if len(known) > 100 else '')}\""
+    return True, "name"
+
+
+def match_people(authors: list[Author], people: list[Person]) -> list[str]:
+    """Names (as in the config) of the listed people who are authors (`match_person`)."""
+    return [p.name for p in people if match_person(authors, p)[0]]
 
 
 class Verifier:
@@ -1252,8 +1278,11 @@ class Verifier:
         rec.matches = self.classify(blocks) if blocks else []
         rec.facility_authors, rec.facility_affs, rec.facility_aff_source = self.facility_affiliations(rec)
         authors = record_authors(rec)
-        rec.staff_authors = match_people(authors, self.people["facility_staff"])
-        rec.requester_authors = match_people(authors, self.people["requesters"])
+        found = {k: [(p, *match_person(authors, p)) for p in ps] for k, ps in self.people.items()}
+        rec.staff_authors = [p.name for p, ok, _ in found["facility_staff"] if ok]
+        rec.requester_authors = [p.name for p, ok, _ in found["requesters"] if ok]
+        how = {p.name: h for p, ok, h in found["facility_staff"] if ok}
+        namesakes = [f"{p.name} ({h})" for ps in found.values() for p, ok, h in ps if not ok and h]
         if rec.staff_authors:
             rec.facility_authors = list(dict.fromkeys(rec.facility_authors + rec.staff_authors))
             rec.facility_aff_source = "; ".join(x for x in (rec.facility_aff_source, "facility staff list") if x)
@@ -1266,7 +1295,8 @@ class Verifier:
                                          section=f"Author affiliations ({rec.facility_aff_source})",
                                          category="Affiliation", klass="Affiliation only", score=0.0))
             elif rec.staff_authors:
-                rec.matches.append(Match(sentence="Author on the facility staff list: " + ", ".join(rec.staff_authors),
+                rec.matches.append(Match(sentence="Author on the facility staff list: "
+                                         + ", ".join(f"{n} (matched by {how[n]})" for n in rec.staff_authors),
                                          section="Author list (facility_staff)", category="Affiliation",
                                          klass="Affiliation only", score=0.0))
         requester = (f"Listed requester(s) among the authors: {', '.join(rec.requester_authors)}. "
@@ -1287,8 +1317,9 @@ class Verifier:
                           "facility is listed as author (database metadata).")
         elif by_name_only and not rec.requester_authors:
             rec.status = "Excluded"
-            rec.reason = ("Found only by an author-name search, but no listed person is an author "
-                          "(a namesake, or a different ORCID)" + ("." if blocks else "; full text not retrievable."))
+            rec.reason = ("Found only by an author-name search, but no listed person is an author"
+                          + (": namesake " + "; ".join(namesakes) if namesakes else " (a namesake)")
+                          + ("." if blocks else "; full text not retrievable."))
         elif not blocks:
             rec.status = "Unverified"
             rec.reason = requester + ("Full text not retrievable (paywalled or not indexed); "

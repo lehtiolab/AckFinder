@@ -133,7 +133,7 @@ and words. If they already have a facility config elsewhere, ask for it and use 
 | 6c | If yes: other facilities paid by the same funder (e.g. *flow cytometry*) | `other_facilities` (list) | no |
 | 7 | Does your field overlap another facility's, so papers should be checked for which kind of work they credit (e.g. proteomics vs metabolomics)? If yes: column name, in-scope label and words, out-of-scope label and words, who does the out-of-scope work | `scope:` block (see `examples/setup_answers.example.yaml`) | no |
 | 8 | Also search author affiliations for the facility name? Such papers are listed even without a statement (default no) | `affiliation_search` | no |
-| 8b | Names of facility staff (e.g. *Jane Doe; Doe, John (0000-0002-1825-0097)*); their papers are listed even without a statement | `facility_staff` (list) | no |
+| 8b | Names of facility staff (e.g. *Jane Doe; Doe, John (0000-0002-1825-0097)*), and the affiliations they publish under (e.g. *Karolinska Institutet; SciLifeLab*); their papers are listed even without a statement. ORCIDs and affiliations keep out namesakes: write a person with affiliations as `{name: Jane Doe, affiliations: [Karolinska Institutet, SciLifeLab]}` | `facility_staff` (list) | no |
 | 8c | Names of people who request the facility's services; their papers count only with a statement. Long lists can be pasted into `config.yaml` later | `requesters` (list) | no |
 | 9 | **Where should the reports be saved?** Suggest `reports/<short>_acknowledgements`. Relative paths are relative to the config file. | `output_dir` | yes (confirm) |
 | 10 | Which years should a run report by default? | `years` (list) | no |

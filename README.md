@@ -155,7 +155,7 @@ these still says `CHANGE_ME`.
 |---|---|---|
 | 3. Funder-only sentences | `funding_regex`, `funding_label`, `context_regex`, `context_label`, `other_facility_regex` | Papers sometimes thank your funder ("… supported by the Infrastructure Board at KI") without naming the facility. Such papers go to *Needs review* and are never counted automatically. |
 | 4. Scope check | `scope_check:` block | Your field overlaps another facility's (e.g. proteomics vs metabolomics). Adds a column such as *MS type*, and excludes or sends to review papers whose credited work is out of scope. |
-| 5. Author searches | `facility_staff`, `requesters`, `affiliation_phrases` | You want to find papers through their authors too. Each list with entries adds a search. A paper with a staff author (or an author whose affiliation names the facility) is listed even without a facility statement; the *Statement* column then says *No* or *Not checked*. Papers by requesters count only with a facility statement. Write people as `Jane Doe` or `Doe, Jane`, optionally with an ORCID: `Jane Doe (0000-0002-1825-0097)`. |
+| 5. Author searches | `facility_staff`, `requesters`, `affiliation_phrases` | You want to find papers through their authors too. Each list with entries adds a search. A paper with a staff author (or an author whose affiliation names the facility) is listed even without a facility statement; the *Statement* column then says *No* or *Not checked*. Papers by requesters count only with a facility statement. Write people as `Jane Doe` or `Doe, Jane`, optionally with an ORCID: `Jane Doe (0000-0002-1825-0097)`, and/or affiliations: `{name: Jane Doe, affiliations: [Karolinska Institutet]}`. ORCID and affiliations tell namesakes apart. |
 | 7. Fine-tuning | `canonical_threshold`, `word_expansions`, `other_doi_prefixes` | Rarely needed. |
 
 Every key is explained in a comment in [`config.example.yaml`](config.example.yaml).
@@ -323,8 +323,11 @@ evidence, and writes the decisions you approve to this file.
    If the scope check is on, each paper with a facility sentence is then labelled by term counts in its text.
 
    The paper's authors are compared with `facility_staff` and `requesters`: same surname and first name (or
-   initial, when only initials are known), accents ignored; an ORCID in Europe PMC's author record overrides the
-   name (same ORCID: match; different ORCID: a namesake). A paper with no facility statement is still listed if
+   initial, when only initials are known), accents ignored. An ORCID, then the person's `affiliations`, refine
+   the name: the same ORCID in Europe PMC's author record is a match under any spelling, and a different ORCID
+   marks a namesake; an author with the name and one of the person's affiliations (Europe PMC/PubMed or OpenAlex
+   author affiliations) is a match, and one whose affiliations are known but include none of them is a namesake.
+   With nothing to compare, the name decides. A paper with no facility statement is still listed if
    the facility is listed as author (a staff author, or an author whose affiliation names the facility). A
    requester's paper without a statement is excluded, or goes to *Needs review* if a funder sentence makes it
    ambiguous.
@@ -370,8 +373,9 @@ Claude Code, copy the folder to `.claude/skills/` in your own project or to `~/.
 * **Coverage.** Full-text indexes cover open-access papers, PMC author manuscripts, preprints, and the paywalled
   papers OpenAlex has indexed. A paywalled paper that none of them hold is found only through the author or
   affiliation searches, and then needs its PDF to be checked, so counts are a lower bound.
-* **Author names.** Name matching cannot tell two people with the same surname and first name apart. Add ORCIDs
-  where you can, and check the *Facility author(s)* column for papers listed without a statement.
+* **Author names.** Name matching alone cannot tell two people with the same surname and first name apart. Add
+  ORCIDs and affiliations where you can. A paper whose records show no ORCID or affiliation for the author is
+  still matched by name; the report says how each staff author was matched ("matched by name" deserves a check).
 * **Indexing lag.** Europe PMC and PMC index new papers days to weeks after publication, so counts for the current
   year keep rising.
 * **Names, not paraphrases.** A paper is counted only if it names the facility in a form that `facility_regex`

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from ackfinder import config as C
 from ackfinder.core import (BASIS_BOTH, BASIS_MEMBER, BASIS_STATEMENT, Author, Item, Record, Searcher, Verifier,
-                            match_people, record_authors, row_for)
+                            match_people, match_person, record_authors, row_for)
 from ackfinder.report import _search_rows, write_reports
 
 from test_classify import CANON
@@ -17,10 +17,12 @@ FUNDER_ONLY = [("Proteomics was supported by the Infrastructure Board at Karolin
                 "Acknowledgements", "Acknowledgements")]
 
 
-def au(last, first, orcid=None):
+def au(last, first, orcid=None, aff=None):
     a = {"lastName": last, "firstName": first}
     if orcid:
         a["authorId"] = {"type": "ORCID", "value": orcid}
+    if aff:
+        a["authorAffiliationDetailsList"] = {"authorAffiliation": [{"affiliation": aff}]}
     return a
 
 
@@ -43,10 +45,22 @@ def test_parse_person_forms():
     assert C.parse_person({"name": "Jane Doe", "orcid": f"https://orcid.org/{ORCID}"}).orcid == ORCID
 
 
+def test_parse_person_affiliations():
+    p = C.parse_person({"name": "Jane Doe", "affiliations": ["Karolinska Institutet", "SciLifeLab"]})
+    assert p.affiliations == ("Karolinska Institutet", "SciLifeLab") and p.orcid is None
+    assert C.parse_person({"name": "Jane Doe", "affiliation": "Karolinska Institutet; SciLifeLab"}).affiliations == \
+        ("Karolinska Institutet", "SciLifeLab")
+    assert C.affiliation_matches("Dept. of Oncology-Pathology, Karolinska Institutet, Solna", p.affiliations) == \
+        "Karolinska Institutet"
+    assert C.affiliation_matches("Science for Life Laboratory (SCILIFELAB), Stockholm", p.affiliations) == "SciLifeLab"
+    assert C.affiliation_matches("Lund University, Sweden", p.affiliations) is None
+
+
 def test_parse_people_errors():
-    people, errors = C.parse_people(["Jane Doe", "Madonna", {"name": "Jane Doe", "orcid": "1234"}], "requesters")
+    people, errors = C.parse_people(["Jane Doe", "Madonna", {"name": "Jane Doe", "orcid": "1234"},
+                                     {"name": "Jane Doe", "afiliations": ["X"]}], "requesters")
     assert len(people) == 1
-    assert len(errors) == 2 and errors[0].startswith("`requesters` entry 2")
+    assert len(errors) == 3 and errors[0].startswith("`requesters` entry 2") and "afiliations" in errors[2]
 
 
 def test_validate_people_and_removed_key(tmp_path):
@@ -64,13 +78,16 @@ def test_validate_people_and_removed_key(tmp_path):
 
 def test_answers_with_people_roundtrip(answers, tmp_path):
     answers = dict(answers, facility_staff=f"Jane Doe; Doe, John ({ORCID})",
-                   requesters=[{"name": "Anna Svensson", "orcid": ORCID}, "Li Wei"])
+                   requesters=[{"name": "Anna Svensson", "orcid": ORCID}, "Li Wei",
+                               {"name": "Åsa Ödegård", "affiliations": "Karolinska Institutet; SciLifeLab"}])
     p = tmp_path / "config.yaml"
     p.write_text(C.render_config(C.build_config(answers)))
     cfg = C.load_config(p)
     assert C.validate(cfg) == ([], [])
     assert cfg["facility_staff"] == ["Jane Doe", f"Doe, John ({ORCID})"]
-    assert [x.orcid for x in C.parse_people(cfg["requesters"])[0]] == [ORCID, None]
+    req = C.parse_people(cfg["requesters"])[0]
+    assert [x.orcid for x in req] == [ORCID, None, None]
+    assert req[2].affiliations == ("Karolinska Institutet", "SciLifeLab")
 
 
 # ------------------------------------------------------------------ matching
@@ -90,13 +107,31 @@ def test_orcid_refines_the_name_match():
     assert match_people(renamed, [C.parse_person(f"Jane Doe ({ORCID})")]) == ["Jane Doe"]
 
 
+def test_affiliation_refines_the_name_match():
+    p = C.parse_person({"name": "Jane Doe", "affiliations": ["Karolinska Institutet", "SciLifeLab"]})
+    ki = record_authors(Record(epmc=[epmc(au("Doe", "Jane", aff="Dept of Medicine, Karolinska Institutet"))]))
+    assert match_person(ki, p) == (True, "name + affiliation Karolinska Institutet")
+    elsewhere = Record(epmc=[epmc(au("Doe", "Jane", aff="Lund University, Sweden"))],
+                       biorxiv={"authors": "Doe, J."})          # a source with less to say does not overrule
+    ok, how = match_person(record_authors(elsewhere), p)
+    assert not ok and "Lund University" in how
+    unknown = record_authors(Record(epmc=[epmc(au("Doe", "Jane"))]))
+    assert match_person(unknown, p) == (True, "name")            # nothing to compare: the name decides
+    both = C.parse_person({"name": "Jane Doe", "orcid": ORCID, "affiliations": ["Karolinska Institutet"]})
+    other_ki = record_authors(Record(epmc=[epmc(au("Doe", "Jane", OTHER, "Karolinska Institutet"))]))
+    assert match_person(other_ki, both) == (False, "same name, different ORCID")    # ORCID comes first
+    oa = record_authors(Record(openalex={"authorships": [{"raw_author_name": "Jane Doe",
+                                                          "raw_affiliation_strings": ["SciLifeLab, Solna"]}]}))
+    assert match_person(oa, p) == (True, "name + affiliation SciLifeLab")
+
+
 def test_openalex_and_biorxiv_give_names_but_openalex_orcids_are_not_trusted():
     rec = Record(openalex={"authorships": [{"raw_author_name": "Jane A. Doe",
                                             "author": {"display_name": "Jane Doe",
                                                        "orcid": f"https://orcid.org/{OTHER}"}}]},
                  biorxiv={"authors": "Smith, J.; Ödegård, Å."})
     authors = record_authors(rec)
-    assert {Author("doe", "jane"), Author("smith", "j"), Author("odegard", "a")} <= set(authors)
+    assert {Author("doe", "jane"), Author("smith", "j"), Author("odegard", "a")} <= set(authors)   # nothing else known
     assert match_people(authors, [C.parse_person(f"Jane Doe ({ORCID})")]) == ["Jane Doe"]
 
 
@@ -166,6 +201,15 @@ def test_requester_counts_only_with_statement(cpms_cfg):
 def test_name_search_namesake_is_excluded(cpms_cfg):
     rec = _verify(_cfg(cpms_cfg), [], [au("Doe", "John")], source="EuropePMC (staff)")
     assert rec.status == "Excluded" and "namesake" in rec.reason
+
+
+def test_staff_affiliation_decides(cpms_cfg):
+    cfg = dict(cpms_cfg, facility_staff=[{"name": "Jane Doe", "affiliations": ["Karolinska Institutet"]}])
+    rec = _verify(cfg, NO_STMT, [au("Doe", "Jane", aff="Karolinska Institutet, Stockholm")], source="EuropePMC (staff)")
+    assert (rec.status, rec.basis) == ("Confirmed", BASIS_MEMBER)
+    assert "matched by name + affiliation Karolinska Institutet" in row_for(rec)["facility_affiliation"]
+    rec = _verify(cfg, NO_STMT, [au("Doe", "Jane", aff="University of Porto")], source="EuropePMC (staff)")
+    assert rec.status == "Excluded" and "Jane Doe (same name, affiliation \"University of Porto\")" in rec.reason
 
 
 # ------------------------------------------------------------------ report

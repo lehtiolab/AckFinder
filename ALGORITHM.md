@@ -36,8 +36,8 @@ validate(cfg) → (errors, warnings)
             bad years / year_basis / canonical_threshold, missing jif_table file
     warnings: facility_regex misses canonical_statement, a search phrase neither regex matches,
               funding_label empty, removed keys (include_facility_authors), unknown keys
-    people:   parse_people(facility_staff / requesters) ─► Person(name, surname, given, orcid);
-              a malformed entry or ORCID is an error
+    people:   parse_people(facility_staff / requesters) ─► Person(name, surname, given, orcid, affiliations);
+              a malformed entry, ORCID or unknown key is an error
 ```
 
 ## A run
@@ -99,8 +99,12 @@ pipeline.run(cfg, settings)
 │     │           names other_facility_regex or out-of-scope work → Excluded
 │     │           matches context_regex (or none set)             → Review
 │     ├─ facility_affiliations(rec) ─► jats_facility_authors()   facility in an author affiliation
-│     ├─ record_authors(rec) ─► match_people(authors, people)    staff_authors, requester_authors
-│     │     same surname + first name (initial if that is all there is); Europe PMC ORCIDs refine it
+│     ├─ record_authors(rec) ─► match_person(authors, p)         staff_authors, requester_authors
+│     │     same surname + first name (initial if that is all there is), refined in this order:
+│     │       1. ORCID (Europe PMC author records): same → match; different → namesake
+│     │       2. affiliations (Europe PMC/PubMed, OpenAlex raw strings): one listed → match;
+│     │          known but none listed → namesake
+│     │       3. nothing to compare → match by name
 │     ├─ status:
 │     │     Canonical/Variant found                       → "Confirmed", then ms_type()
 │     │     facility listed as author (affiliation/staff) → "Confirmed", basis "Facility listed as author, no statement"

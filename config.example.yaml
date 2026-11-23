@@ -127,11 +127,21 @@ scope_check:
 #     statement. Ambiguous ones go to "Needs review"; the rest are excluded.
 # Write each person as "Firstname Lastname", or "Lastname, Firstname" for compound
 # surnames. The name is always searched. Add the ORCID if you know it, as
-# "Jane Doe (0000-0002-1825-0097)" or as
+# "Jane Doe (0000-0002-1825-0097)". Add affiliations (and the ORCID) like this:
 #   - name: Jane Doe
-#     orcid: 0000-0002-1825-0097
+#     orcid: 0000-0002-1825-0097          # optional
+#     affiliations: [Karolinska Institutet, SciLifeLab]
+# or on one line: - {name: Jane Doe, affiliations: [Karolinska Institutet, SciLifeLab]}
 # Names match on surname and first name (or initial when a paper gives only
-# initials). An ORCID also finds papers under other spellings and rules out namesakes.
+# initials). ORCID, then affiliations, refine the match, as long as the paper shows them:
+#   * ORCID: the same ORCID is a match under any spelling; a different one marks a namesake.
+#     An ORCID is also searched, so papers under other spellings are found.
+#   * affiliations: an author with the name and one of these affiliations is a match; one
+#     whose affiliations are known but include none of them is a namesake. Case, accents
+#     and punctuation are ignored, and a phrase may end mid-word ("Karolinska Institute"
+#     also matches "Karolinska Institutet", but not the other way round). Affiliations are
+#     not searched.
+#   * nothing to compare: the name decides.
 facility_staff: []
 requesters: []
 

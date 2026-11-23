@@ -30,7 +30,8 @@ scope:
   out_of_scope_facilities: [Metabolomics Core]
 
 affiliation_search: false                         # also search author affiliations for the facility name
-facility_staff: []                                # "Jane Doe" or "Jane Doe (0000-0002-1825-0097)"
+facility_staff: []                                # "Jane Doe", "Jane Doe (0000-0002-1825-0097)" or
+                                                  # {name: Jane Doe, affiliations: [Karolinska Institutet]}
 requesters: []                                    # count only with a facility statement
 
 # Folders (relative to config.yaml)
